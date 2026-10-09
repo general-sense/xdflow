@@ -7,9 +7,10 @@ import inspect
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
+import xarray as xr
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
@@ -35,15 +36,25 @@ from xdflow.utils.target_utils import extract_target_array
 from xdflow.utils.visualizations import plot_confusion_matrix
 
 
-def _scorer_accepts_container(scorer: Callable) -> bool:
-    """Check if a scorer accepts a container argument (3 args instead of 2)."""
+def _scorer_container_mode(scorer: Callable) -> str:
+    """Return how a scorer accepts the optional validation container: "positional", "keyword" or "none".
+
+    Keyword-only parameters such as sklearn's ``sample_weight`` do not count as a third positional slot,
+    so ``accuracy_score`` or ``partial(f1_score, average="macro")`` are called as ``(y_true, y_pred)``.
+    """
     sig = getattr(scorer, "__signature__", None) or inspect.signature(scorer)
-    params = [
-        p
-        for p in sig.parameters.values()
-        if p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    params = list(sig.parameters.values())
+    positional_params = [
+        p for p in params if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
     ]
-    return len(params) >= 3
+    if len(positional_params) >= 3 or any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+        return "positional"
+    if any(
+        p.name == "container" and p.kind in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        for p in params
+    ) or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
+        return "keyword"
+    return "none"
 
 
 def _make_multioutput_scorer(metric_func, name, *, negate: bool = False):
@@ -111,6 +122,7 @@ class CrossValidator(ABC):
         ),
         "f1_macro": lambda: (lambda y_true, y_pred: f1_score(y_true, y_pred, average="macro"), "f1_macro", False),
         "f1_micro": lambda: (lambda y_true, y_pred: f1_score(y_true, y_pred, average="micro"), "f1_micro", False),
+        "accuracy": lambda: (lambda y_true, y_pred: accuracy_score(y_true, y_pred), "accuracy", False),
         "f1_samples": lambda: (
             lambda y_true, y_pred: f1_score(y_true, y_pred, average="samples", zero_division=0),
             "f1_samples",
@@ -189,6 +201,10 @@ class CrossValidator(ABC):
         self.oof_predictions_ = []  # Out-of-fold predictions
         self.oof_probabilities_ = []  # Out-of-fold probabilities/scores
         self.true_labels_ = []
+        self.oof_containers_: list[DataContainer] = []  # Per-fold scored predictions with their trial coords
+        # Class order at evaluation time; finalize_pipeline may later refit the template's encoder
+        self.oof_class_labels_: list[Any] | None = None
+        self.holdout_class_labels_: list[Any] | None = None
 
         # Holdout test set management
         # NOTE: `holdout_trial_labels_` stores trial labels in the stateless-preprocessed space.
@@ -215,6 +231,7 @@ class CrossValidator(ABC):
         self._metric_name: str | None = None
         self._scoring_needs_proba = False
         self._scoring_accepts_container = False
+        self._scoring_container_mode = "none"
 
         self.verbose = verbose
 
@@ -246,6 +263,23 @@ class CrossValidator(ABC):
             Iterator yielding (train_indices, validation_indices) tuples
         """
         raise NotImplementedError
+
+    def _snapshot_class_labels(self) -> list[Any] | None:
+        """Current class order of a single-label classifier, else None."""
+        final_predictor = self._get_final_predictor()
+        if final_predictor is None or not final_predictor.is_classifier or final_predictor.is_multilabel:
+            return None
+        return final_predictor.get_labels()
+
+    def _confusion_labels(self, evaluated_labels: list[Any] | None) -> list[Any]:
+        """Class order used when the results were produced, so confusion matrices keep rows for absent classes
+        and are not reshaped by a later refit of the template encoder."""
+        if evaluated_labels is not None:
+            return evaluated_labels
+        labels = self._snapshot_class_labels()
+        if labels is None:
+            raise ValueError("Confusion matrix is only available for single-label classification.")
+        return labels
 
     def _get_final_predictor(self) -> Predictor | None:
         """
@@ -357,16 +391,12 @@ class CrossValidator(ABC):
         tuple[Callable, str, bool]
             A tuple of (scoring_function, metric_name, needs_proba)
         """
-        if self._scoring_func is not None:
-            # Already resolved
-            if self._metric_name is None:
-                raise RuntimeError("Scoring function was resolved without a metric name.")
-            return self._scoring_func, self._metric_name, self._scoring_needs_proba
-
+        # Resolved on every call (cheap) so changes to `scoring` or the pipeline are never served stale.
+        # Built-in scorers take (y_true, y_pred); only a custom callable below may accept the container.
+        self._scoring_container_mode = "none"
+        self._scoring_accepts_container = False
         # Get the final predictor to determine task type
-        final_predictor = None
-        for predictor in self._iter_predictors(self._pipeline):
-            final_predictor = predictor
+        final_predictor = self._get_final_predictor()
 
         if final_predictor is None:
             raise ValueError("Pipeline must end with a Predictor to use scoring")
@@ -375,7 +405,8 @@ class CrossValidator(ABC):
         if callable(self.scoring):
             self._scoring_func = self.scoring
             self._metric_name = "custom"
-            self._scoring_accepts_container = _scorer_accepts_container(self.scoring)
+            self._scoring_container_mode = _scorer_container_mode(self.scoring)
+            self._scoring_accepts_container = self._scoring_container_mode != "none"
             self._scoring_needs_proba = bool(self.scoring_needs_proba)
             if self._scoring_needs_proba and not final_predictor.is_classifier:
                 raise ValueError(
@@ -506,7 +537,12 @@ class CrossValidator(ABC):
             return
 
         if isinstance(transform, CompositeTransform):
-            for child in transform.children:
+            children = list(transform.children)
+            # GroupApplyTransform's children exist only after fit; its template is what the groups are cloned from
+            template = getattr(transform, "transform_template", None)
+            if isinstance(template, TransformType) and not any(child is template for child in children):
+                children.append(template)
+            for child in children:
                 if isinstance(child, TransformType):
                     yield from self._iter_predictors(child)
 
@@ -681,15 +717,19 @@ class CrossValidator(ABC):
             Fitted pipeline (either newly fitted or loaded from cache)
         """
         if self.use_stateful_fit_cache:
-            key_dict = {
-                "kind": "stateful_fit",
-                "pipeline_name": getattr(fold_pipeline, "name", "pipeline"),
-                "stateful_config": (
-                    fold_pipeline.get_params(deep=True) if hasattr(fold_pipeline, "get_params") else None
-                ),
-                "module_hashes": get_module_hashes_for_object(fold_pipeline),
-                "train_signature": _get_object_metadata(train_container),
-            }
+            # Snapshot the key before fitting: it references live objects that fit mutates, and the
+            # save below must use the same key as the lookup.
+            key_dict = _get_object_metadata(
+                {
+                    "kind": "stateful_fit",
+                    "pipeline_name": getattr(fold_pipeline, "name", "pipeline"),
+                    "stateful_config": (
+                        fold_pipeline.get_params(deep=True) if hasattr(fold_pipeline, "get_params") else None
+                    ),
+                    "module_hashes": get_module_hashes_for_object(fold_pipeline),
+                    "train_signature": train_container,
+                }
+            )
             cached = try_load_cached_object(prefix="stateful_fit", key_dict=key_dict)
             if cached is None:
                 fold_pipeline.fit(train_container, verbose=verbose)
@@ -701,6 +741,16 @@ class CrossValidator(ABC):
             fold_pipeline.fit(train_container, verbose=verbose)
 
         return fold_pipeline
+
+    def _call_scoring_func(
+        self, scoring_func: Callable, true_labels: np.ndarray, predictions: np.ndarray, container: DataContainer
+    ) -> float:
+        """Call a scorer, passing the scoring container in the style its signature accepts."""
+        if self._scoring_container_mode == "keyword":
+            return scoring_func(true_labels, predictions, container=container)
+        if self._scoring_container_mode == "positional":
+            return scoring_func(true_labels, predictions, container)
+        return scoring_func(true_labels, predictions)
 
     def _process_cv_fold(
         self,
@@ -764,15 +814,13 @@ class CrossValidator(ABC):
             scoring_values = validation_proba if scoring_mask is None else validation_proba[scoring_mask]
 
         # Calculate fold score using the selected scoring function
-        if self._scoring_accepts_container:
-            fold_score = scoring_func(true_labels, scoring_values, scoring_container)
-        else:
-            fold_score = scoring_func(true_labels, scoring_values)
+        fold_score = self._call_scoring_func(scoring_func, true_labels, scoring_values, scoring_container)
         self.cv_scores_.append(fold_score)
         self.oof_predictions_.append(pred_labels)
         if needs_proba:
             self.oof_probabilities_.append(scoring_values)
         self.true_labels_.append(true_labels)
+        self.oof_containers_.append(scoring_container)
 
         if self.verbose:
             print(f"    Fold {fold_idx + 1} {metric_name}: {fold_score:.4f}")
@@ -809,6 +857,12 @@ class CrossValidator(ABC):
         Raises:
             ValueError: If no pipeline is assigned
         """
+        # Splits select trials by label, so duplicated labels would put the same label on both sides of a split
+        if "trial" in initial_container.data.indexes and not initial_container.data.indexes["trial"].is_unique:
+            raise ValueError(
+                "Trial labels must be unique for cross-validation (e.g. renumber trials after concatenating sessions)."
+            )
+
         # Fit encoders globally on initial data
         self._find_and_fit_encoders(self.pipeline, initial_container)
 
@@ -835,6 +889,8 @@ class CrossValidator(ABC):
         self.oof_predictions_ = []
         self.oof_probabilities_ = []
         self.true_labels_ = []
+        self.oof_containers_ = []
+        self.oof_class_labels_ = self._snapshot_class_labels()
 
         # Step 7: Run cross-validation loop with stateful pipeline
         if stateful_pipeline is not None:
@@ -875,10 +931,9 @@ class CrossValidator(ABC):
         Returns:
             The fitted pipeline object, ready for inference.
         """
-        fitted_pipeline = self.pipeline.clone()
-
-        # Fit encoders globally
+        # Fit encoders globally before cloning so the clone carries (a copy of) the fitted class order
         self._find_and_fit_encoders(self.pipeline, container)
+        fitted_pipeline = self.pipeline.clone()
 
         fitted_pipeline.fit(container, verbose=verbose)
         prepare_for_inference = getattr(fitted_pipeline, "prepare_for_inference", None)
@@ -965,15 +1020,15 @@ class CrossValidator(ABC):
         # Store the holdout container and filtered predictions for container-aware scorers
         self.holdout_container_ = scoring_container
         self.holdout_pred_labels_ = pred_labels
+        self.holdout_class_labels_ = self._snapshot_class_labels()
         self.holdout_probabilities_ = scoring_values if needs_proba else holdout_probabilities
         self.holdout_true_labels_ = true_labels
         self.holdout_scoring_mask_ = None
 
         # Calculate and store final score using the selected scoring function
-        if self._scoring_accepts_container:
-            self.holdout_score_ = scoring_func(self.holdout_true_labels_, scoring_values, scoring_container)
-        else:
-            self.holdout_score_ = scoring_func(self.holdout_true_labels_, scoring_values)
+        self.holdout_score_ = self._call_scoring_func(
+            scoring_func, self.holdout_true_labels_, scoring_values, scoring_container
+        )
 
         return self.holdout_score_
 
@@ -1057,9 +1112,13 @@ class CrossValidator(ABC):
         if self.holdout_scoring_mask_ is not None:
             y_true = self.holdout_true_labels_[self.holdout_scoring_mask_]
             y_pred = self.holdout_pred_labels_[self.holdout_scoring_mask_]
-            return confusion_matrix(y_true, y_pred)
+            return confusion_matrix(y_true, y_pred, labels=self._confusion_labels(self.holdout_class_labels_))
 
-        return confusion_matrix(self.holdout_true_labels_, self.holdout_pred_labels_)
+        return confusion_matrix(
+            self.holdout_true_labels_,
+            self.holdout_pred_labels_,
+            labels=self._confusion_labels(self.holdout_class_labels_),
+        )
 
     @property
     def holdout_confusion_matrix_normalized_(self) -> np.ndarray:
@@ -1090,9 +1149,16 @@ class CrossValidator(ABC):
         if self.holdout_scoring_mask_ is not None:
             y_true = self.holdout_true_labels_[self.holdout_scoring_mask_]
             y_pred = self.holdout_pred_labels_[self.holdout_scoring_mask_]
-            return confusion_matrix(y_true, y_pred, normalize="true")
+            return confusion_matrix(
+                y_true, y_pred, labels=self._confusion_labels(self.holdout_class_labels_), normalize="true"
+            )
 
-        return confusion_matrix(self.holdout_true_labels_, self.holdout_pred_labels_, normalize="true")
+        return confusion_matrix(
+            self.holdout_true_labels_,
+            self.holdout_pred_labels_,
+            labels=self._confusion_labels(self.holdout_class_labels_),
+            normalize="true",
+        )
 
     def _compute_oof_metric(self, scoring_func: Callable) -> float:
         """
@@ -1246,6 +1312,21 @@ class CrossValidator(ABC):
         return np.mean(self.cv_scores_)
 
     @property
+    def oof_predictions_container_(self) -> DataContainer:
+        """Out-of-fold predictions for every scored validation trial, in one container.
+
+        Keeps each trial's coordinates (labels, groups such as subject or session) plus a `fold` coordinate,
+        so CV results can be broken down by any metadata, e.g. accuracy per subject.
+        """
+        if not self.oof_containers_:
+            raise ValueError("No out-of-fold predictions available. Run cross_validate() first.")
+        folds = [
+            container.data.assign_coords(fold=("trial", np.full(container.data.sizes["trial"], fold_idx)))
+            for fold_idx, container in enumerate(self.oof_containers_)
+        ]
+        return DataContainer(xr.concat(folds, dim="trial"))
+
+    @property
     def oof_confusion_matrix_(self) -> np.ndarray:
         """
         Calculate confusion matrix from out-of-fold predictions.
@@ -1271,7 +1352,7 @@ class CrossValidator(ABC):
         all_predictions = np.concatenate(self.oof_predictions_)
         all_true_labels = np.concatenate(self.true_labels_)
 
-        return confusion_matrix(all_true_labels, all_predictions)
+        return confusion_matrix(all_true_labels, all_predictions, labels=self._confusion_labels(self.oof_class_labels_))
 
     @property
     def oof_confusion_matrix_normalized_(self) -> np.ndarray:
@@ -1299,7 +1380,9 @@ class CrossValidator(ABC):
         all_predictions = np.concatenate(self.oof_predictions_)
         all_true_labels = np.concatenate(self.true_labels_)
 
-        return confusion_matrix(all_true_labels, all_predictions, normalize="true")
+        return confusion_matrix(
+            all_true_labels, all_predictions, labels=self._confusion_labels(self.oof_class_labels_), normalize="true"
+        )
 
     def get_fold_scores(self) -> list:
         """
@@ -1401,7 +1484,8 @@ class CrossValidator(ABC):
         predictive_transform = self.pipeline.predictive_transform
         if predictive_transform is None or predictive_transform.encoder is None:
             raise ValueError("Pipeline predictor must have a fitted encoder before plotting confusion matrix.")
-        classes = predictive_transform.encoder.classes_
+        evaluated_labels = self.holdout_class_labels_ if use_holdout else self.oof_class_labels_
+        classes = evaluated_labels if evaluated_labels is not None else predictive_transform.encoder.classes_
 
         if title_info:
             title_info = f"{title_info},"

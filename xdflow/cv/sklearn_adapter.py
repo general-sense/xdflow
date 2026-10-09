@@ -44,7 +44,6 @@ class SklearnCVAdapter(BaseCrossValidator):
             The custom cross validator to adapt
         """
         self.cross_validator = cross_validator
-        self._n_splits = None
 
     def split(self, X, y=None, groups=None):
         """
@@ -69,25 +68,17 @@ class SklearnCVAdapter(BaseCrossValidator):
         # Get splits from the cross validator
         splits = self.cross_validator._get_splits(container, train_val_indices)
 
-        n_splits = 0
         for train_trials, val_trials in splits:
             # Convert trial IDs to 0-based indices
             train_indices = np.array([trial_to_idx[t] for t in train_trials])
             val_indices = np.array([trial_to_idx[t] for t in val_trials])
-
-            n_splits += 1
             yield train_indices, val_indices
-
-        self._n_splits = n_splits
 
     def get_n_splits(self, X=None, y=None, groups=None):
         """
         Returns the number of splitting iterations in the cross-validator.
         """
-        # If we've already done a split, return cached value
-        if self._n_splits is not None:
-            return self._n_splits
-
+        # Not cached: the adapter is reused across containers (e.g. CV folds) whose split counts can differ.
         # Get container from context variable
         container = _current_container.get()
         if container is None:
@@ -98,10 +89,7 @@ class SklearnCVAdapter(BaseCrossValidator):
 
         # Count the splits
         train_val_indices, _ = self.cross_validator._split_holdout(container)
-        splits = list(self.cross_validator._get_splits(container, train_val_indices))
-        self._n_splits = len(splits)
-
-        return self._n_splits
+        return sum(1 for _ in self.cross_validator._get_splits(container, train_val_indices))
 
 
 @contextmanager

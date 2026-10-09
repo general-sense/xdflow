@@ -15,8 +15,11 @@ lambda functions or locally-defined classes with MultiOutputRegressor/MultiOutpu
 from sklearn.base import BaseEstimator
 from sklearn.multioutput import MultiOutputClassifier, MultiOutputRegressor
 
+from xdflow.utils.inspection import build_estimator
+
 
 class MultiOutputRegressorFactory:
+    _forwards_kwargs_to_base = True  # see xdflow.utils.inspection.build_estimator
     """
     Picklable factory that wraps any sklearn-compatible estimator in MultiOutputRegressor.
 
@@ -55,8 +58,7 @@ class MultiOutputRegressorFactory:
         MultiOutputRegressor
             The wrapped estimator ready for multi-target regression
         """
-        base_estimator = self.base_estimator_cls(**kwargs)
-        return MultiOutputRegressor(base_estimator)
+        return MultiOutputRegressor(build_estimator(self.base_estimator_cls, kwargs))
 
     def __repr__(self) -> str:
         """Readable representation for debugging."""
@@ -70,12 +72,13 @@ class MultiOutputRegressorFactory:
 class MultiOutputClassifierFactory:
     """Picklable factory that wraps any sklearn-compatible estimator in MultiOutputClassifier."""
 
+    _forwards_kwargs_to_base = True  # see xdflow.utils.inspection.build_estimator
+
     def __init__(self, base_estimator_cls: type[BaseEstimator]):
         self.base_estimator_cls = base_estimator_cls
 
     def __call__(self, **kwargs) -> MultiOutputClassifier:
-        base_estimator = self.base_estimator_cls(**kwargs)
-        return MultiOutputClassifier(base_estimator)
+        return MultiOutputClassifier(build_estimator(self.base_estimator_cls, kwargs))
 
     def __repr__(self) -> str:
         """Readable representation for debugging."""

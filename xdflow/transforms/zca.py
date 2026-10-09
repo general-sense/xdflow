@@ -9,8 +9,18 @@ from sklearn.decomposition import PCA
 
 from xdflow.core.base import Transform
 from xdflow.core.data_container import DataContainer
+from xdflow.transforms.pca import _fit_labels, _select_fit_labels
 from xdflow.transforms.sklearn_transform import SKLearnTransformer
 from xdflow.transforms.spatial import _map_from_grid, _map_to_grid
+
+
+def _center_mode_for(center_data: bool | str) -> str:
+    """Normalize `center_data` to "true", "false" or "false_oldstyle"; raise on anything else."""
+    if isinstance(center_data, bool):
+        return "true" if center_data else "false"
+    if isinstance(center_data, str) and center_data.lower() == "false_oldstyle":
+        return "false_oldstyle"
+    raise ValueError("center_data must be True, False, or 'false_oldstyle'.")
 
 
 class LocalZCAWhitening(Transform):
@@ -95,16 +105,15 @@ class LocalZCAWhitening(Transform):
         self.whitening_strength = whitening_strength
         self.n_components = n_components
         self.pca_frac_to_keep = float(pca_frac_to_keep) if pca_frac_to_keep is not None else None
-        # Normalize centering mode
-        if isinstance(center_data, bool):
-            self._center_mode = "true" if center_data else "false"
-        elif isinstance(center_data, str) and center_data.lower() == "false_oldstyle":
-            self._center_mode = "false_oldstyle"
-        else:
-            raise ValueError("center_data must be True, False, or 'false_oldstyle'.")
+        _center_mode_for(center_data)  # validate now; `_center_mode` derives it on read
         self.center_data = center_data
         self.W_local = None  # The whitening matrix, learned during fit
         self.data_mean = None  # Mean for centering, computed during fit
+
+    @property
+    def _center_mode(self) -> str:
+        """`center_data` normalized, derived on read so `set_params(center_data=...)` reaches it."""
+        return _center_mode_for(self.center_data)
 
     def _calculate_zca_matrix(self, covariance_matrix):
         """
@@ -447,18 +456,18 @@ class GlobalZCAWhitening(Transform):
         self.whitening_strength = float(whitening_strength)
         self.n_components = n_components
         self.pca_frac_to_keep = float(pca_frac_to_keep) if pca_frac_to_keep is not None else None
-        if isinstance(center_data, bool):
-            self._center_mode = "true" if center_data else "false"
-        elif isinstance(center_data, str) and center_data.lower() == "false_oldstyle":
-            self._center_mode = "false_oldstyle"
-        else:
-            raise ValueError("center_data must be True, False, or 'false_oldstyle'.")
+        _center_mode_for(center_data)  # validate now; `_center_mode` derives it on read
         self.center_data = center_data
         self.keep_in_pc_space = bool(keep_in_pc_space)
         self.shrinkage = shrinkage
 
         self.W_global: np.ndarray | None = None
         self.channel_mean = None  # xarray DataArray of shape (channel,)
+
+    @property
+    def _center_mode(self) -> str:
+        """`center_data` normalized, derived on read so `set_params(center_data=...)` reaches it."""
+        return _center_mode_for(self.center_data)
 
     def _calculate_zca_matrix(self, covariance_matrix: np.ndarray) -> np.ndarray:
         """
@@ -527,6 +536,7 @@ class GlobalZCAWhitening(Transform):
             Self.
         """
         data_array = container.data
+        self._fit_channel_labels = _fit_labels(data_array, "channel")
 
         # Optional centering mean saved for use at transform-time
         if self._center_mode == "true":
@@ -570,6 +580,7 @@ class GlobalZCAWhitening(Transform):
             raise RuntimeError("The transform has not been fitted yet. Call 'fit' before 'transform'.")
 
         data_array = container.data
+        data_array = _select_fit_labels(data_array, "channel", getattr(self, "_fit_channel_labels", None))
 
         # Prepare data as (channels, samples)
         data_ctt = data_array.transpose("channel", "trial", "time")
@@ -699,17 +710,17 @@ class GlobalColoringProjection(Transform):
         self.epsilon = float(epsilon)
         self.n_components = n_components
         self.pca_frac_to_keep = float(pca_frac_to_keep) if pca_frac_to_keep is not None else None
-        if isinstance(center_data, bool):
-            self._center_mode = "true" if center_data else "false"
-        elif isinstance(center_data, str) and center_data.lower() == "false_oldstyle":
-            self._center_mode = "false_oldstyle"
-        else:
-            raise ValueError("center_data must be True, False, or 'false_oldstyle'.")
+        _center_mode_for(center_data)  # validate now; `_center_mode` derives it on read
         self.center_data = center_data
 
         # Learned parameters
         self.W_color: np.ndarray | None = None  # The coloring matrix
         self.channel_mean: xr.DataArray | None = None  # Mean for centering
+
+    @property
+    def _center_mode(self) -> str:
+        """`center_data` normalized, derived on read so `set_params(center_data=...)` reaches it."""
+        return _center_mode_for(self.center_data)
 
     def _calculate_coloring_matrix(self, covariance_matrix: np.ndarray) -> np.ndarray:
         """
@@ -763,14 +774,9 @@ class GlobalColoringProjection(Transform):
         exponent = 0.5
         coloring_scaler = (eigvals + self.epsilon) ** exponent
 
-        # Construct the full coloring matrix: eigvecs @ diag(eigvals^1/2) @ eigvecs.T
-        # We select the top 'n_to_keep' components for the projection
-        # by effectively taking the first n_to_keep rows of the full matrix.
-        # This is equivalent to: (eigvecs[:, :n_to_keep] @ diag(eigvals[:n_to_keep]^1/2)).T
-        coloring_matrix_full = eigvecs @ np.diag(coloring_scaler) @ eigvecs.T
-
-        # Return the top 'n_to_keep' rows which correspond to the strongest patterns
-        return coloring_matrix_full[:n_to_keep, :]
+        # Project onto the top 'n_to_keep' eigenvectors, scaled by eigvals^1/2:
+        # (eigvecs[:, :n_to_keep] @ diag(eigvals[:n_to_keep]^1/2)).T
+        return (eigvecs[:, :n_to_keep] * coloring_scaler[:n_to_keep]).T
 
     def _fit(self, container: DataContainer, **kwargs) -> GlobalColoringProjection:
         """
@@ -783,6 +789,7 @@ class GlobalColoringProjection(Transform):
             Self.
         """
         data_array = container.data
+        self._fit_channel_labels = _fit_labels(data_array, "channel")
 
         # Optional centering mean saved for use at transform-time
         if self._center_mode == "true":
@@ -826,6 +833,7 @@ class GlobalColoringProjection(Transform):
             raise RuntimeError("The transform has not been fitted yet. Call 'fit' before 'transform'.")
 
         data_array = container.data
+        data_array = _select_fit_labels(data_array, "channel", getattr(self, "_fit_channel_labels", None))
 
         # Prepare data as (channels, samples)
         data_ctt = data_array.transpose("channel", "trial", "time")
@@ -898,6 +906,7 @@ class ZCAWhitening(BaseEstimator, TransformerMixin):
         # Use PCA with whitening
         self.pca_ = PCA(n_components=self.n_components, whiten=True, random_state=self.random_state)
         self.pca_.fit(x)
+        self.zca_version_ = 2  # objects fitted before the whitening fix lack this (see transform)
         return self
 
     def transform(self, x):
@@ -912,11 +921,16 @@ class ZCAWhitening(BaseEstimator, TransformerMixin):
         """
         if not hasattr(self, "pca_"):
             raise ValueError("ZCAWhitening must be fitted before transform")
+        if not hasattr(self, "zca_version_"):
+            # Unpickled from xdflow < 0.3, whose transform returned its input; a downstream model fitted on that
+            # output would silently get different features now.
+            raise ValueError(
+                "This ZCAWhitening was fitted with xdflow < 0.3, which did not whiten; refit the pipeline."
+            )
 
-        # Apply PCA whitening and then invert back to original space
+        # Whiten in PCA space, then rotate back to feature space (no rescaling): U diag(1/sqrt(l)) U^T (x - mean)
         x_whitened = self.pca_.transform(x)
-        x_zca = self.pca_.inverse_transform(x_whitened)
-        return x_zca
+        return x_whitened @ self.pca_.components_
 
     def inverse_transform(self, x):
         """
@@ -931,9 +945,8 @@ class ZCAWhitening(BaseEstimator, TransformerMixin):
         if not hasattr(self, "pca_"):
             raise ValueError("ZCAWhitening must be fitted before inverse_transform")
 
-        # For ZCA, the inverse is the same as the forward transform
-        # since ZCA is symmetric: ZCA = PCA_whiten + PCA_inverse
-        return self.transform(x)
+        # Rotate back into PCA space, then un-whiten and restore the mean
+        return self.pca_.inverse_transform(np.asarray(x) @ self.pca_.components_.T)
 
 
 class ZCATransform(SKLearnTransformer):

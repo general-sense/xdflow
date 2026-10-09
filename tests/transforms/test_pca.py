@@ -77,3 +77,40 @@ class TestPCACloning:
 
         cloned = pca.clone()
         assert not hasattr(cloned, "_fitted")  # Should be unfitted
+
+
+def test_fitted_projection_follows_channel_labels_not_positions():
+    import numpy as np
+    import xarray as xr
+
+    from xdflow.core.data_container import DataContainer
+    from xdflow.transforms.pca import GlobalFeaturePCA
+    from xdflow.transforms.zca import GlobalZCAWhitening
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(30, 3, 20)) * np.array([1.0, 5.0, 0.2])[None, :, None]
+    data = xr.DataArray(
+        X,
+        dims=("trial", "channel", "time"),
+        coords={"trial": np.arange(30), "channel": ["a", "b", "c"], "time": np.arange(20)},
+    )
+    reordered = data.sel(channel=["c", "a", "b"])
+
+    for transform in (GlobalFeaturePCA(n_components=2), GlobalZCAWhitening(n_components=3)):
+        transform.fit(DataContainer(data))
+        expected = transform.transform(DataContainer(data)).data
+        actual = transform.transform(DataContainer(reordered)).data
+        np.testing.assert_allclose(actual.values, expected.values)
+
+
+def test_zca_whitening_fitted_before_the_whitening_fix_refuses_to_transform():
+    import numpy as np
+    import pytest
+
+    from xdflow.transforms.zca import ZCAWhitening
+
+    zca = ZCAWhitening().fit(np.random.default_rng(0).normal(size=(50, 3)))
+    del zca.zca_version_  # as unpickled from xdflow < 0.3
+
+    with pytest.raises(ValueError, match="refit"):
+        zca.transform(np.zeros((2, 3)))

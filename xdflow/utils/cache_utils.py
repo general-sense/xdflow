@@ -5,18 +5,21 @@ This module provides functions for caching and retrieving preprocessed and featu
 based on input parameters. It uses a hash of the input parameters to create unique cache keys.
 """
 
+import functools
 import hashlib
 import inspect
 import json
 import os
 import pickle
 import shutil
+import threading
 import time
 from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
 from typing import Any
 
+import joblib
 import numpy as np
 import pandas as pd
 
@@ -36,7 +39,7 @@ DEFAULT_MAX_CACHE_AGE = 7
 
 def _get_module_hash_from_obj(obj: Any) -> str | None:
     """Get hash of the module containing the object."""
-    if inspect.isclass(obj):
+    if inspect.isclass(obj) or inspect.isroutine(obj):
         module = inspect.getmodule(obj)
     else:
         module = inspect.getmodule(obj.__class__)
@@ -44,7 +47,10 @@ def _get_module_hash_from_obj(obj: Any) -> str | None:
     if module is None:
         return None
 
-    source_file = inspect.getsourcefile(module)
+    try:
+        source_file = inspect.getsourcefile(module)
+    except TypeError:  # built-in module
+        return None
     if source_file is None:
         return None
 
@@ -124,20 +130,6 @@ def save_cached_object(prefix: str, key_dict: dict[str, Any], obj: Any) -> None:
         return
 
 
-def _safe_scalar(value: Any) -> Any:
-    """Convert a value to a JSON-serializable, deterministic scalar.
-
-    - Converts numpy scalars to Python scalars
-    - Replaces NaN/Inf with None
-    """
-    if hasattr(value, "item"):
-        value = value.item()
-    if isinstance(value, float):
-        if np.isnan(value) or np.isinf(value):
-            return None
-    return value
-
-
 def get_pipeline_cache_key_dict(func: Callable, instance: Any, *args, **kwargs) -> dict[str, Any]:
     """
     Generate a cache key dictionary for a pipeline.
@@ -195,7 +187,7 @@ def cache_result(
 
     Args:
         prefix: Prefix for the cache directory (e.g., 'preprocess', 'featurize')
-        max_size: Maximum cache size in bytes for this prefix
+        max_size: Maximum total cache size in bytes across all prefixes
         max_age_days: Maximum age of cache files in days
         key_gen_func: Optional function to generate the cache key dictionary.
                       If None, a default key generation logic is used.
@@ -210,20 +202,21 @@ def cache_result(
             # Get the instance if this is an instance method
             instance = args[0] if args and hasattr(args[0], "__dict__") else None
 
-            if instance and not getattr(instance, "use_cache", False):
+            # Only outputs are cached, so a hit would skip fitting: stateful instances always run.
+            if instance and (not getattr(instance, "use_cache", False) or getattr(instance, "is_stateful", False)):
                 return func(*args, **kwargs)
 
             # Clean up cache files
             _cleanup_old_cache_files(max_age_days, prefix)
             _enforce_cache_size_limit(max_size, prefix)
 
-            print("Checking cache")
-
+            # Verbosity does not change results, so it must not change the key
+            key_kwargs = {k: v for k, v in kwargs.items() if k != "verbose"}
             if key_gen_func and instance:
-                key_dict = key_gen_func(func, *args, **kwargs)
+                key_dict = key_gen_func(func, *args, **key_kwargs)
             else:
                 # Get arguments of function
-                bound_args = inspect.signature(func).bind(*args, **kwargs)
+                bound_args = inspect.signature(func).bind(*args, **key_kwargs)
                 bound_args.apply_defaults()
                 key_dict = {
                     k: _get_object_metadata(v) for k, v in bound_args.arguments.items() if k != "self" or not instance
@@ -236,7 +229,8 @@ def cache_result(
             cache_key = hash_dict(key_dict)
             cache_path = _get_cache_dir(prefix) / f"{cache_key}.pkl"
 
-            print(f"Cache path: {cache_path}", "Cache exists:", cache_path.exists())
+            if kwargs.get("verbose", False):
+                print(f"Cache {'hit' if cache_path.exists() else 'miss'}: {cache_path}")
 
             # Return cached result if it exists
             if cache_path.exists():
@@ -265,168 +259,129 @@ def cache_result(
 
 
 def _get_ndarray_metadata(arr: np.ndarray) -> dict[str, Any]:
-    """Build a lightweight, deterministic signature for a numpy array."""
-    meta: dict[str, Any] = {
-        "shape": tuple(arr.shape),
-        "dtype": str(arr.dtype),
-    }
-    flat = arr.ravel()
-    size = int(flat.size)
-    sample_n = min(32, size)
-    if sample_n > 0:
-        idx = np.unique(np.linspace(0, size - 1, num=sample_n, dtype=int))
-        sample_vals = flat[idx]
-        meta["sample"] = tuple(_safe_scalar(v) for v in sample_vals)
-    return meta
+    """Build a deterministic signature for a numpy array from its full contents."""
+    return {"shape": tuple(arr.shape), "dtype": str(arr.dtype), "hash": joblib.hash(arr)}
 
 
 def _get_datacontainer_metadata(dc: DataContainer) -> dict[str, Any]:
-    """Build a deterministic signature for a DataContainer, including trial signature and small data sample."""
-    meta: dict[str, Any] = {
+    """Build a deterministic signature for a DataContainer from its full values and coordinates.
+
+    Hashing everything (not a sample) is what keeps a cache from returning results computed on
+    different data or labels.
+    """
+    return {
         "shape": tuple(dc.shape),
-        "coords": tuple(dc.coords.keys()),
         "dims": tuple(dc.dims),
+        "data": _get_ndarray_metadata(np.asarray(dc.data.values)),
+        "coord_metadata": {
+            str(name): {"dims": tuple(coord.dims), **_get_ndarray_metadata(np.asarray(coord.values))}
+            for name, coord in dc.data.coords.items()
+        },
+        # Transforms may read settings from attrs (e.g. a sampling rate). `data_history` only records the
+        # steps already applied, which the step configuration in the key covers.
+        "attrs": _get_object_metadata({str(k): v for k, v in dc.data.attrs.items() if k != "data_history"}),
     }
-
-    # Include coordinate value fingerprints to detect label changes
-    coord_metadata: dict[str, Any] = {}
-    for coord_name in dc.coords.keys():
-        coord_values = np.asarray(dc.data.coords[coord_name].values)
-        coord_info: dict[str, Any] = {
-            "shape": tuple(coord_values.shape),
-            "dtype": str(getattr(coord_values, "dtype", type(coord_values).__name__)),
-        }
-        flat = coord_values.ravel()
-        size = int(flat.size)
-        sample_n = min(32, size)
-        if sample_n > 0:
-            idx = np.unique(np.linspace(0, size - 1, num=sample_n, dtype=int))
-            sample_vals = flat[idx]
-            coord_info["sample"] = tuple(_safe_scalar(v) for v in sample_vals)
-        coord_metadata[coord_name] = coord_info
-    meta["coord_metadata"] = coord_metadata
-
-    # Trial signature to uniquely identify splits
-    if "trial" in dc.data.coords:
-        trial_values = np.asarray(dc.data.trial.values)
-        num_trials = int(trial_values.shape[0])
-
-        head = trial_values[:8].tolist() if num_trials > 0 else []
-        mid_start = max(0, num_trials // 2)
-        mid = trial_values[mid_start : mid_start + 8].tolist() if num_trials > 0 else []
-        tail = trial_values[-8:].tolist() if num_trials > 0 else []
-
-        if num_trials > 0:
-            sample_idx = np.unique(np.linspace(0, num_trials - 1, num=min(32, num_trials), dtype=int))
-            sample = trial_values[sample_idx].tolist()
-        else:
-            sample = []
-
-        def _to_native_list(values):
-            return [v.item() if hasattr(v, "item") else v for v in values]
-
-        meta["trial_signature"] = {
-            "len": num_trials,
-            "head": tuple(_to_native_list(head)),
-            "mid": tuple(_to_native_list(mid)),
-            "tail": tuple(_to_native_list(tail)),
-            "sample": tuple(_to_native_list(sample)),
-        }
-
-    # Small content fingerprint of underlying data values
-    data_vals = dc.data.values
-    meta["data_dtype"] = str(getattr(data_vals, "dtype", "unknown"))
-    flat = np.asarray(data_vals).ravel()
-    size = int(flat.size)
-    sample_n = min(32, size)
-    if sample_n > 0:
-        idx = np.unique(np.linspace(0, size - 1, num=sample_n, dtype=int))
-        sample_vals = flat[idx]
-        meta["data_sample"] = tuple(_safe_scalar(v) for v in sample_vals)
-
-    return meta
 
 
 def _get_dataframe_metadata(df: pd.DataFrame) -> dict[str, Any]:
-    """Build a deterministic signature for a pandas DataFrame."""
-    meta_df: dict[str, Any] = {
-        "shape": tuple(df.shape),
-        "columns": tuple(str(c) for c in df.columns),
-        "dtypes": tuple(str(t) for t in df.dtypes.values),
-    }
-    meta_df["null_counts"] = tuple(int(n) for n in df.isna().sum().values)
-    n_rows = int(df.shape[0])
-    if n_rows > 0:
-        row_idx = np.unique(np.linspace(0, n_rows - 1, num=min(16, n_rows), dtype=int))
-        sampled = df.iloc[row_idx]
-        sample_repr = []
-        for _, row in sampled.iterrows():
-            sample_repr.append(tuple(_safe_scalar(v) for v in row.values))
-        meta_df["row_sample"] = tuple(sample_repr)
-    return meta_df
+    """Build a deterministic signature for a pandas DataFrame from its full contents."""
+    return {"shape": tuple(df.shape), "columns": tuple(str(c) for c in df.columns), "hash": joblib.hash(df)}
 
 
 def _get_series_metadata(s: pd.Series) -> dict[str, Any]:
-    """Build a deterministic signature for a pandas Series."""
-    meta_s: dict[str, Any] = {
-        "length": int(s.shape[0]),
-        "name": str(s.name),
-        "dtype": str(s.dtype),
-    }
-    meta_s["null_count"] = int(s.isna().sum())
-    n = int(s.shape[0])
-    if n > 0:
-        idx = np.unique(np.linspace(0, n - 1, num=min(32, n), dtype=int))
-        meta_s["sample"] = tuple(_safe_scalar(v) for v in s.iloc[idx].values)
-    return meta_s
+    """Build a deterministic signature for a pandas Series from its full contents."""
+    return {"length": int(s.shape[0]), "name": str(s.name), "hash": joblib.hash(s)}
 
 
 def _get_dict_metadata(d: dict[Any, Any]) -> dict[str, Any]:
     """Build a deterministic signature for a dictionary."""
     keys_sorted = sorted(d.keys(), key=lambda x: str(x))
-    meta_dict: dict[str, Any] = {
-        "length": len(d),
-        "keys": tuple(str(k) for k in keys_sorted),
-    }
-    n = len(keys_sorted)
-    if n > 0:
-        idx = np.unique(np.linspace(0, n - 1, num=min(32, n), dtype=int))
-        sample_items = [(keys_sorted[i], d[keys_sorted[i]]) for i in idx]
-        meta_dict["sample_items"] = tuple((str(k), _get_object_metadata(v)) for k, v in sample_items)
-    return meta_dict
+    return {"length": len(d), "items": tuple((str(k), _get_object_metadata(d[k])) for k in keys_sorted)}
 
 
 def _get_sequence_metadata(seq: Any) -> dict[str, Any]:
     """Build a deterministic signature for a list/tuple."""
-    n = len(seq)
-    meta_seq: dict[str, Any] = {
-        "type": type(seq).__name__,
-        "length": n,
-    }
-    if n > 0:
-        idx = np.unique(np.linspace(0, n - 1, num=min(32, n), dtype=int))
-        meta_seq["sample"] = tuple(_get_object_metadata(seq[i]) for i in idx)
-    return meta_seq
+    return {"type": type(seq).__name__, "items": tuple(_get_object_metadata(v) for v in seq)}
 
 
 def _get_set_metadata(s: set) -> dict[str, Any]:
     """Build a deterministic signature for a set."""
-    sorted_vals = sorted(s, key=lambda x: str(x))
-    n = len(sorted_vals)
-    meta_set: dict[str, Any] = {
-        "type": "set",
-        "length": n,
-    }
-    if n > 0:
-        idx = np.unique(np.linspace(0, n - 1, num=min(32, n), dtype=int))
-        meta_set["sample"] = tuple(_get_object_metadata(sorted_vals[i]) for i in idx)
-    return meta_set
+    return {"type": "set", "items": tuple(_get_object_metadata(v) for v in sorted(s, key=lambda x: str(x)))}
+
+
+def _const_repr(const: Any) -> str:
+    if inspect.iscode(const):
+        return _code_fingerprint(const)
+    if isinstance(const, frozenset):  # set literals: repr order depends on per-process hash randomization
+        return repr(sorted(_const_repr(c) for c in const))
+    if isinstance(const, tuple):
+        return repr(tuple(_const_repr(c) for c in const))
+    return repr(const)
+
+
+def _code_fingerprint(code: Any) -> str:
+    """Hash of a code object's bytecode, constants and names (nested code objects hashed recursively)."""
+    consts = tuple(_const_repr(c) for c in code.co_consts)
+    return hashlib.md5(code.co_code + repr((consts, code.co_names)).encode("utf-8")).hexdigest()
+
+
+def _is_plain_callable(obj: Any) -> bool:
+    """Functions, methods, partials and callable instances (ufuncs, dispatchers), but not classes or
+    configurable objects such as transforms and estimators (those are fingerprinted by their params)."""
+    return callable(obj) and not isinstance(obj, type) and not hasattr(obj, "get_params")
+
+
+_callables_in_progress = threading.local()
 
 
 def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
     """Build a deterministic signature for a callable."""
-    qualname = getattr(fn, "__qualname__", getattr(fn, "__name__", str(fn)))
-    return {"callable": str(qualname), "module_hash": _get_module_hash_from_obj(fn)}
+    qualname = getattr(fn, "__qualname__", getattr(fn, "__name__", type(fn).__qualname__))
+    name = f"{getattr(fn, '__module__', None)}.{qualname}"
+    in_progress = _callables_in_progress.__dict__.setdefault("ids", set())
+    if id(fn) in in_progress:  # recursive closure referring to itself
+        return {"callable": name, "recursive": True}
+    in_progress.add(id(fn))
+    try:
+        if isinstance(fn, functools.partial):
+            return {
+                "partial": _get_callable_metadata(fn.func),
+                "args": _get_object_metadata(list(fn.args)),
+                "keywords": _get_object_metadata(dict(fn.keywords)),
+            }
+        if inspect.ismethod(fn):  # bound method: its receiver's state matters too
+            return {"method": _get_callable_metadata(fn.__func__), "self": _get_object_params(fn.__self__)}
+        meta: dict[str, Any] = {"callable": name, "module_hash": _get_module_hash_from_obj(fn)}
+        code = getattr(fn, "__code__", None)
+        if code is not None:
+            # Lambdas and closures share a qualname, so also hash the code, defaults and captured values.
+            # shortcut: module-level globals the function reads are not hashed; edits are covered by module_hash.
+            cells = []
+            for cell in fn.__closure__ or ():  # type: ignore[attr-defined]
+                try:
+                    cells.append(cell.cell_contents)
+                except ValueError:  # empty cell
+                    cells.append(None)
+            meta["code"] = _code_fingerprint(code)
+            meta["defaults"] = _get_object_metadata(list(fn.__defaults__ or ()))  # type: ignore[attr-defined]
+            meta["kwdefaults"] = _get_object_metadata(dict(fn.__kwdefaults__ or {}))  # type: ignore[attr-defined]
+            meta["closure"] = _get_object_metadata(cells)
+        elif not isinstance(fn, type):
+            # Callable instance (ufunc, operator.methodcaller, object with __call__): hash its pickled state,
+            # which covers __slots__ and C-level configuration; fall back to public attributes.
+            try:
+                meta["state"] = joblib.hash(fn)
+            except Exception:  # not picklable (e.g. a locally defined class): use its attributes and slots
+                state = dict(getattr(fn, "__dict__", {}))
+                for klass in type(fn).__mro__:
+                    slots = getattr(klass, "__slots__", ())
+                    for slot in (slots,) if isinstance(slots, str) else slots:
+                        if hasattr(fn, slot):
+                            state.setdefault(slot, getattr(fn, slot))
+                meta["state"] = {k: _get_object_metadata(v) for k, v in state.items() if not k.startswith("_")}
+        return meta
+    finally:
+        in_progress.discard(id(fn))
 
 
 def _get_object_with_dict_metadata(obj: Any) -> dict[str, Any]:
@@ -485,6 +440,9 @@ def _get_object_params(obj: Any) -> Any:
 
     params_to_exclude = ["scent_encoder", "transform_from_name", "fitted_"]  # TODO: make this more robust/flexible?
 
+    if _is_plain_callable(obj):
+        return _get_callable_metadata(obj)
+
     if not hasattr(obj, "__dict__"):
         if isinstance(obj, (list, tuple)):
             return [_get_object_params(item) for item in obj]
@@ -494,18 +452,29 @@ def _get_object_params(obj: Any) -> Any:
     # Get class name for type identification
     params["__class__"] = obj.__class__.__name__
 
-    # Get all attributes that don't start with '_'
-    for key, value in obj.__dict__.items():
-        if key in params_to_exclude:
+    # Public attributes, plus get_params() for objects that keep configuration elsewhere
+    # (e.g. AdaptWrapperTransform's estimator kwargs)
+    items = {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
+    get_params = getattr(obj, "get_params", None)
+    if callable(get_params) and not isinstance(obj, type):
+        try:
+            items = {**get_params(deep=False), **items}
+        except TypeError:
+            pass
+    for key, value in items.items():
+        if key in params_to_exclude or key.startswith("_"):
             continue
-        if not key.startswith("_"):  # Skip private attributes
-            if hasattr(value, "__dict__"):
-                # Recursively get parameters of nested objects
-                params[key] = _get_object_params(value)
-            elif isinstance(value, (list, tuple)):
-                params[key] = [_get_object_params(item) for item in value]
-            else:
-                params[key] = str(value)
+        if _is_plain_callable(value):
+            params[key] = _get_callable_metadata(value)
+        elif hasattr(value, "__dict__"):
+            # Recursively get parameters of nested objects
+            params[key] = _get_object_params(value)
+        elif isinstance(value, (list, tuple)):
+            params[key] = [_get_object_params(item) for item in value]
+        elif isinstance(value, np.ndarray):
+            params[key] = joblib.hash(value)  # str() truncates large arrays
+        else:
+            params[key] = str(value)
 
     return params
 
@@ -599,44 +568,39 @@ def _enforce_cache_size_limit(
     max_size: int = DEFAULT_MAX_CACHE_SIZE, prefix: str | None = None, verbose: bool = False
 ) -> None:
     """
-    Remove oldest cache files until total size is under max_size if there is more than 1 file.
+    Remove least-recently-modified cache files until the whole cache is under max_size.
+
+    The limit applies across all prefixes combined, so separate prefixes cannot each grow to
+    max_size. ``prefix`` is accepted for call-site compatibility but does not scope the limit.
 
     Args:
-        max_size: Maximum cache size in bytes
-        prefix: Optional prefix to enforce limit on specific cache directory
+        max_size: Maximum total cache size in bytes across all prefixes
+        prefix: Unused; kept for backwards-compatible call signature
     """
     cache_root = _get_cache_root()
     if not cache_root.exists():
         return
 
-    if prefix:
-        cache_dirs = [cache_root / prefix] if (cache_root / prefix).exists() else []
-    else:
-        cache_dirs = [d for d in cache_root.iterdir() if d.is_dir()]
+    files = [(f, f.stat().st_mtime) for d in cache_root.iterdir() if d.is_dir() for f in d.glob("*.pkl")]
+    if len(files) <= 1:
+        return
 
-    for cache_dir in cache_dirs:
-        # Get list of files with their modification times
-        files = [(f, f.stat().st_mtime) for f in cache_dir.glob("*.pkl")]
-        if not files or len(files) <= 1:
+    # Sort by modification time (oldest first)
+    files.sort(key=lambda x: x[1])
+
+    current_size = _get_cache_size()
+    if verbose:
+        print(f"Current cache size: {current_size / 1024 / 1024 / 1024:.2f} GB")
+    for f, _ in files:
+        if current_size <= max_size:
+            break
+        size = f.stat().st_size
+        try:
+            f.unlink()
+            current_size -= size
+        except PermissionError:
+            # Ignore files we cannot remove; continue trimming others
             continue
-
-        # Sort by modification time (oldest first)
-        files.sort(key=lambda x: x[1])
-
-        # Remove oldest files until under size limit
-        current_size = _get_cache_size(prefix)
-        if verbose:
-            print(f"Current cache size: {current_size / 1024 / 1024 / 1024:.2f} GB")
-        for f, _ in files:
-            if current_size <= max_size:
-                break
-            size = f.stat().st_size
-            try:
-                f.unlink()
-                current_size -= size
-            except PermissionError:
-                # Ignore files we cannot remove; continue trimming others
-                continue
 
 
 def clear_cache(prefix: str | None = None) -> None:

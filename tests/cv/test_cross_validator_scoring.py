@@ -1,8 +1,12 @@
 """Tests for cross-validator scoring behavior."""
 
+from functools import partial
+
 import numpy as np
+import pytest
 import xarray as xr
 from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.metrics import accuracy_score, f1_score
 
 from xdflow.composite import Pipeline
 from xdflow.core.data_container import DataContainer
@@ -237,3 +241,102 @@ def test_sampled_domain_kfold_splits_target_validation_and_sampled_target_traini
         assert set(validation_domains) == {"target"}
         assert np.sum(train_domains == "source") == n_source
         assert np.sum(train_domains == "target") == 2
+
+
+def _clf_cv(scoring) -> KFoldValidator:
+    clf = SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="stimulus", max_iter=200)
+    cv = KFoldValidator(n_splits=3, test_size=0.2, scoring=scoring, use_stateful_fit_cache=False, verbose=False)
+    cv.pipeline = Pipeline("clf_pipeline", [("clf", clf)])
+    return cv
+
+
+@pytest.mark.parametrize(
+    "scoring",
+    [accuracy_score, partial(f1_score, average="macro"), "accuracy"],
+    ids=["sklearn_metric", "partial_metric", "accuracy_string"],
+)
+def test_sklearn_metrics_score_without_container(scoring):
+    """Keyword-only params (sklearn's sample_weight, ...) are not a third positional slot for the container."""
+    data = _create_eval_data(task="classification")
+    cv = _clf_cv(scoring)
+
+    score = cv.cross_validate(data, verbose=False)
+    holdout = cv.score_on_holdout(data)
+
+    assert 0.0 <= score <= 1.0
+    assert 0.0 <= holdout <= 1.0
+
+
+def test_keyword_only_container_scorer_receives_container():
+    data = _create_eval_data(task="classification")
+    seen = []
+
+    def scorer(y_true, y_pred, *, container):
+        seen.append(container.data.sizes["trial"])
+        return float(accuracy_score(y_true, y_pred))
+
+    cv = _clf_cv(scorer)
+    cv.cross_validate(data, verbose=False)
+
+    assert len(seen) == 3 and all(n == len(y) for n, y in zip(seen, cv.true_labels_))
+
+
+def test_duplicate_trial_labels_are_rejected_upfront():
+    data = _create_eval_data(task="classification")
+    duplicated = DataContainer(data.data.assign_coords(trial=np.zeros(data.data.sizes["trial"], dtype=int)))
+
+    with pytest.raises(ValueError, match="Trial labels must be unique"):
+        _clf_cv("f1_weighted").cross_validate(duplicated, verbose=False)
+
+
+def test_switching_from_container_scorer_to_builtin_resets_calling_mode():
+    cv = _clf_cv(lambda y_true, y_pred, container: 1.0)
+    cv._get_scoring_func()
+    cv.scoring = "accuracy"
+    scoring_func, _, _ = cv._get_scoring_func()
+
+    assert cv._call_scoring_func(scoring_func, np.arange(3), np.arange(3), None) == 1.0
+
+
+def test_confusion_matrix_keeps_evaluated_classes_after_finalize():
+    data = _create_eval_data(task="classification")
+    cv = _clf_cv("f1_weighted")
+    cv.cross_validate(data, verbose=False)
+    before = cv.oof_confusion_matrix_.sum()
+    dropped_class = data.data["stimulus"].values[0]
+
+    cv.finalize_pipeline(DataContainer(data.data.isel(trial=data.data["stimulus"].values != dropped_class)))
+
+    assert cv.oof_confusion_matrix_.sum() == before
+
+
+def test_scoring_resolves_predictor_inside_unfitted_group_apply():
+    from xdflow.composite import GroupApplyTransform
+
+    data = _create_eval_data(task="classification")
+    per_session = GroupApplyTransform(
+        "session", SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="stimulus", max_iter=200)
+    )
+    cv = KFoldValidator(n_splits=3, test_size=0.2, scoring="accuracy", verbose=False)
+    cv.set_pipeline(Pipeline("per_session", [("model", per_session)]))
+
+    score = cv.cross_validate(data, verbose=False)
+    holdout = cv.score_on_holdout(data)
+
+    assert cv.metric_name_ == "accuracy"
+    assert 0.0 <= score <= 1.0 and 0.0 <= holdout <= 1.0
+
+
+def test_oof_predictions_container_keeps_trial_coords():
+    data = _create_eval_data(task="classification")
+    cv = _clf_cv("f1_weighted")
+    cv.cross_validate(data, verbose=False)
+
+    oof = cv.oof_predictions_container_.data
+
+    np.testing.assert_array_equal(oof.values, np.concatenate(cv.oof_predictions_))
+    np.testing.assert_array_equal(oof["stimulus"].values, np.concatenate(cv.true_labels_))
+    assert oof["trial"].to_index().is_unique
+    assert set(np.unique(oof["fold"].values)) == set(range(len(cv.cv_scores_)))
+    # trial ids map back to the input data
+    np.testing.assert_array_equal(data.data.sel(trial=oof["trial"].values)["stimulus"].values, oof["stimulus"].values)

@@ -470,3 +470,241 @@ def test_group_apply_clone_vs_deepcopy_independence(sample_container):
     for fitted_transform in group_apply.per_group_fitted.values():
         assert fitted_transform.fit_calls == 1
         assert fitted_transform.transform_calls == 1
+
+
+def test_group_apply_output_keeps_input_sample_order_and_dtype():
+    from xdflow.transforms.basic_transforms import IdentityTransform
+
+    n = 12
+    data = DataContainer(
+        xr.DataArray(
+            np.arange(n * 2, dtype=np.int64).reshape(n, 2),
+            dims=("trial", "feature"),
+            coords={"trial": np.arange(n), "feature": [0, 1], "animal": ("trial", np.array(["b", "a", "c"] * 4))},
+        )
+    )
+    out = GroupApplyTransform("animal", IdentityTransform()).fit_transform(data)
+
+    np.testing.assert_array_equal(out.data["trial"].values, data.data["trial"].values)
+    np.testing.assert_array_equal(out.data.values, data.data.values)
+    assert out.data.dtype == np.int64
+
+
+def test_unseen_group_average_predicts_existing_classes():
+    from sklearn.linear_model import LogisticRegression
+
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    rng = np.random.default_rng(0)
+    n = 60
+    labels = np.array([0, 2] * (n // 2))
+    sessions = np.array(["s1"] * 20 + ["s2"] * 20 + ["s3"] * 20)
+    X = rng.normal(size=(n, 2))
+    X[:, 0] += np.where(sessions == "s1", 3, -3) * (labels == 2)  # sessions disagree, so label averages hit 1
+    data = DataContainer(
+        xr.DataArray(
+            X,
+            dims=("trial", "feature"),
+            coords={"trial": np.arange(n), "feature": [0, 1], "y": ("trial", labels), "session": ("trial", sessions)},
+        )
+    )
+    train = DataContainer(data.data.isel(trial=sessions != "s3"))
+    unseen = DataContainer(data.data.isel(trial=sessions == "s3"))
+
+    group_apply = GroupApplyTransform(
+        "session",
+        SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="y"),
+        unseen_policy="average",
+    )
+    group_apply.fit(train)
+
+    assert set(np.unique(group_apply.predict(unseen).data.values)) <= {0, 2}
+
+
+def _labelled(X, labels, groups, trial=None):
+    n = len(labels)
+    return DataContainer(
+        xr.DataArray(
+            X,
+            dims=("trial", "feature"),
+            coords={
+                "trial": np.arange(n) if trial is None else trial,
+                "feature": np.arange(X.shape[1]),
+                "y": ("trial", np.array(labels)),
+                "g": ("trial", np.array(groups)),
+            },
+        )
+    )
+
+
+def test_group_apply_restores_order_without_unique_trial_labels():
+    from xdflow.transforms.basic_transforms import IdentityTransform
+
+    data = _labelled(np.arange(4.0)[:, None], [0, 1, 0, 1], ["b", "a", "b", "a"], trial=[0, 0, 1, 1])
+    out = GroupApplyTransform("g", IdentityTransform()).fit_transform(data).data
+
+    np.testing.assert_array_equal(out.values[:, 0], [0, 1, 2, 3])
+    assert not any(str(c).startswith("_xdflow_input_position") for c in out.coords)
+
+
+def test_unseen_group_average_keeps_classes_only_some_groups_saw():
+    from sklearn.dummy import DummyClassifier
+
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    train = _labelled(np.zeros((8, 1)), [0, 0, 0, 1, 1, 2, 2, 2], ["a"] * 4 + ["b"] * 4)
+    unseen = _labelled(np.zeros((1, 1)), [0], ["c"])
+    group_apply = GroupApplyTransform(
+        "g", SKLearnPredictor(DummyClassifier, "trial", "y", strategy="prior"), unseen_policy="average"
+    ).fit(train)
+
+    proba = group_apply.predict_proba(unseen).data
+    np.testing.assert_array_equal(proba["class"].values, [0, 1, 2])
+    np.testing.assert_allclose(proba.values, [[0.375, 0.25, 0.375]])
+
+
+def test_unseen_group_votes_on_labels_without_predict_proba():
+    from sklearn.svm import SVC
+
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    rng = np.random.default_rng(0)
+    train = _labelled(rng.normal(size=(40, 2)), [0, 1] * 20, ["a"] * 20 + ["b"] * 20)
+    unseen = _labelled(rng.normal(size=(4, 2)), [0, 1] * 2, ["c"] * 4)
+    group_apply = GroupApplyTransform("g", SKLearnPredictor(SVC, "trial", "y"), unseen_policy="average").fit(train)
+
+    assert set(np.unique(group_apply.predict(unseen).data.values)) <= {0, 1}
+
+
+def test_nested_params_follow_a_replaced_template():
+    from sklearn.linear_model import Ridge
+
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    def ridge(alpha):
+        return SKLearnPredictor(Ridge, "trial", "y", is_classifier=False, alpha=alpha)
+
+    group_apply = GroupApplyTransform("g", ridge(1.0))
+    group_apply.set_params(transform_template=ridge(2.0))
+    group_apply.set_params(transform_template__alpha=9.0)
+
+    assert group_apply.clone().transform_template.estimator.alpha == 9.0
+
+
+def test_group_apply_pipeline_template_ending_in_predictor():
+    from sklearn.linear_model import LogisticRegression
+
+    from xdflow.composite import Pipeline
+    from xdflow.transforms.normalization import ZScoreTransform
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    rng = np.random.default_rng(0)
+    n = 60
+    labels = np.array(["a", "b"] * (n // 2))
+    sessions = np.repeat(["s1", "s2", "s3"], n // 3)
+    X = rng.normal(size=(n, 2))
+    X[:, 0] += 2.0 * (labels == "b")
+    data = xr.DataArray(
+        X,
+        dims=("trial", "feature"),
+        coords={"trial": np.arange(n), "feature": [0, 1], "y": ("trial", labels), "session": ("trial", sessions)},
+    )
+    train = DataContainer(data.isel(trial=sessions != "s3"))
+    unseen = DataContainer(data.isel(trial=sessions == "s3"))
+    template = Pipeline(
+        name="per_session",
+        steps=[
+            ("scale", ZScoreTransform(per_dim="feature", use_fit=True)),
+            ("clf", SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="y")),
+        ],
+    )
+    group_apply = GroupApplyTransform("session", template, unseen_policy="average")
+    assert group_apply.is_predictor
+
+    group_apply.fit(train)
+    predictions = group_apply.predict(train)
+    probabilities = group_apply.predict_proba(train)
+
+    np.testing.assert_array_equal(predictions.data["trial"].values, train.data["trial"].values)
+    assert probabilities.data.sizes["trial"] == train.data.sizes["trial"]
+    assert set(np.unique(group_apply.predict(unseen).data.values)) <= {"a", "b"}
+    # Each group's output is exactly what its own fitted pipeline (scaling included) predicts
+    for session, fitted in group_apply.per_group_fitted.items():
+        session_data = DataContainer(train.data.isel(trial=train.data["session"].values == session))
+        trials = session_data.data["trial"].values
+        np.testing.assert_array_equal(
+            predictions.data.sel(trial=trials).values, fitted.predict(session_data).data.values
+        )
+        np.testing.assert_allclose(
+            probabilities.data.sel(trial=trials).values, fitted.predict_proba(session_data).data.values
+        )
+
+
+def test_nested_group_apply_restores_order_without_unique_labels():
+    from xdflow.transforms.basic_transforms import IdentityTransform
+
+    data = _labelled(np.arange(4.0)[:, None], [0, 1, 0, 1], ["b", "a", "b", "a"], trial=[0, 0, 1, 1])
+    data = DataContainer(data.data.assign_coords(h=("trial", ["x", "x", "y", "y"])))
+    out = GroupApplyTransform("g", GroupApplyTransform("h", IdentityTransform())).fit_transform(data).data
+
+    np.testing.assert_array_equal(out.values[:, 0], [0, 1, 2, 3])
+    assert not any(str(c).startswith("_xdflow_input_position") for c in out.coords)
+
+
+def test_unseen_group_transform_keeps_classes_only_some_groups_saw():
+    from sklearn.dummy import DummyClassifier
+
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    train = _labelled(np.zeros((8, 1)), [0, 0, 0, 1, 1, 2, 2, 2], ["a"] * 4 + ["b"] * 4)
+    unseen = _labelled(np.zeros((1, 1)), [0], ["c"])
+    group_apply = GroupApplyTransform(
+        "g", SKLearnPredictor(DummyClassifier, "trial", "y", strategy="prior", proba=True), unseen_policy="average"
+    ).fit(train)
+
+    np.testing.assert_allclose(group_apply.transform(unseen).data.values, [[0.375, 0.25, 0.375]])
+
+
+def test_cached_inner_pipeline_does_not_restore_a_stale_order():
+    from xdflow.composite import Pipeline
+    from xdflow.transforms.basic_transforms import IdentityTransform
+
+    data = _labelled(np.arange(4.0)[:, None], [0, 1, 0, 1], ["a", "b", "a", "b"])
+
+    def run(container):
+        inner = Pipeline("inner", [("id", IdentityTransform())], use_cache=True)
+        return GroupApplyTransform("g", inner).fit_transform(container).data.values[:, 0]
+
+    np.testing.assert_array_equal(run(data), [0, 1, 2, 3])
+    # Same rows, interleaved differently: each group's own data is unchanged, so its cached output is reused
+    permuted = DataContainer(data.data.isel(trial=[1, 0, 3, 2]))
+    np.testing.assert_array_equal(run(permuted), [1, 0, 3, 2])
+
+
+def test_unseen_group_label_vote_weights_models_not_trials():
+    from sklearn.dummy import DummyClassifier
+
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    train = _labelled(np.zeros((8, 1)), [0, 0, 1, 1, 1, 1, 1, 1], ["a"] * 2 + ["b"] * 6)
+    unseen = _labelled(np.zeros((2, 1)), [0, 1], ["c", "c"], trial=[10, 11])
+    group_apply = GroupApplyTransform(
+        "g", SKLearnPredictor(DummyClassifier, "trial", "y", strategy="most_frequent"), unseen_policy="weighted_average"
+    ).fit(train)
+
+    # the 6-trial group's model (predicting 1) outweighs the 2-trial group's (predicting 0)
+    np.testing.assert_array_equal(group_apply.transform(unseen).data.values.ravel(), [1, 1])
+    predicted = group_apply.predict(unseen).data.values
+    np.testing.assert_array_equal(predicted, [1, 1])
+    assert predicted.dtype.kind == "i"  # labels keep their dtype
+
+
+def test_existing_numbered_coord_is_not_mistaken_for_the_position_tag():
+    from xdflow.transforms.basic_transforms import IdentityTransform
+
+    data = _labelled(np.arange(4.0)[:, None], [0, 1, 0, 1], ["a", "b", "a", "b"])
+    data = DataContainer(data.data.assign_coords(_xdflow_input_position7=("trial", [3, 2, 1, 0])))
+    out = GroupApplyTransform("g", IdentityTransform()).fit_transform(data).data
+
+    np.testing.assert_array_equal(out.values[:, 0], [0, 1, 2, 3])
+    np.testing.assert_array_equal(out["_xdflow_input_position7"].values, [3, 2, 1, 0])

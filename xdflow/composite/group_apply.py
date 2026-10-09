@@ -1,14 +1,32 @@
 import warnings
 from collections.abc import Hashable
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 from joblib import Parallel, delayed
 
 from xdflow.composite.base import CompositeTransform
 from xdflow.core.base import Predictor, Transform
 from xdflow.core.data_container import DataContainer, TransformError
+from xdflow.utils.positions import latest_tag, restore_positions, tag_positions
+
+
+def _final_predictor(transform: Transform) -> Predictor | None:
+    """Return the predictor that makes `transform`'s predictions: itself, or a composite's predictive step."""
+    if isinstance(transform, CompositeTransform):
+        predictive = transform.predictive_transform
+        return predictive if isinstance(predictive, Predictor) else None
+    return transform if isinstance(transform, Predictor) else None
+
+
+def _supports_proba(predictor: Predictor) -> bool:
+    """Whether a fitted predictor can produce class probabilities."""
+    estimator = getattr(predictor, "estimator", None)
+    if estimator is not None:
+        return hasattr(estimator, "predict_proba")
+    return type(predictor)._predict_proba is not Predictor._predict_proba
 
 
 class GroupApplyTransform(CompositeTransform):
@@ -67,24 +85,32 @@ class GroupApplyTransform(CompositeTransform):
         # Compute max size per dimension to avoid nans during concatenation
         self.max_size_per_dim = {}  # used for equalizing output dimensions
 
-        # Compute combined group coord name
-        self.combined_group_coord = "_".join(self.group_coord)
-
-        # Call parent after setting up children collections, but override is_stateful manually
-        # since children won't exist until after fitting
         super().__init__()
-
-        # Override is_stateful based on template or overrides since children don't exist yet
-        self.is_stateful = self.transform_template.is_stateful
-
-        # only keep the template transform
-        self.transform_from_name = {"transform_template": self.transform_template}
         self._validate_composition()
+
+    @property
+    def transform_from_name(self) -> dict[str, Transform]:
+        # Derived on read so set_params(transform_template=...) is followed by nested set_params
+        return {"transform_template": self.transform_template}
 
     @property
     def children(self) -> list[Transform]:
         """Returns fitted per-group transforms after fitting."""
         return list(self.per_group_fitted.values())
+
+    @property
+    def is_stateful(self) -> bool:  # type: ignore[override]
+        # Per-group children only exist after fitting, so follow the template
+        return self.transform_template.is_stateful
+
+    @property
+    def combined_group_coord(self) -> str:
+        return "_".join(self.group_coord)
+
+    def set_params(self, **params: Any) -> "GroupApplyTransform":
+        if isinstance(params.get("group_coord"), str):
+            params = {**params, "group_coord": [params["group_coord"]]}
+        return cast("GroupApplyTransform", super().set_params(**params))
 
     @property
     def is_predictor(self) -> bool:
@@ -139,16 +165,21 @@ class GroupApplyTransform(CompositeTransform):
         return group_coord_dims[0]
 
     def _set_combined_group_coord_values(self, container: DataContainer) -> DataContainer:
-        """Sets the combined group coordinate."""
+        """Sets the combined group coordinate and tags each sample with its input position."""
+        data, _ = tag_positions(container.data, cast(str, self.group_dim))
 
         if len(self.group_coord) == 1:
-            return container
-
-        data = container.data
+            return DataContainer(data)
 
         # Use zip for robust, element-wise string joining of coordinate values.
         coord_values = [data.coords[c].values for c in self.group_coord]
-        combined_coords = ["_".join(map(str, row)) for row in zip(*coord_values, strict=True)]
+        rows = list(zip(*coord_values, strict=True))
+        combined_coords = ["_".join(map(str, row)) for row in rows]
+        if len(set(combined_coords)) != len(set(rows)):
+            raise ValueError(
+                f"Group coordinates {self.group_coord} produce ambiguous combined keys when joined with '_' "
+                "(e.g. ('a_b', 'c') and ('a', 'b_c')); rename coordinate values to avoid merging groups."
+            )
 
         data = data.assign_coords({self.combined_group_coord: (self.group_dim, combined_coords)})
 
@@ -161,10 +192,9 @@ class GroupApplyTransform(CompositeTransform):
 
     def _select_group(self, container: DataContainer, group_val: Hashable) -> DataContainer:
         """Selects data for a specific group using boolean indexing."""
-        # Use boolean indexing to select the group
-        group_mask = container.data.coords[self.combined_group_coord] == group_val
-        group_data = container.data.where(group_mask, drop=True)
-        return DataContainer(group_data)
+        # Positional boolean indexing; `where(drop=True)` would cast int data to float
+        group_mask = container.data.coords[self.combined_group_coord].values == group_val
+        return DataContainer(container.data.isel({self.group_dim: group_mask}))
 
     def _validate_group_output_preserves_axis(
         self, group_val: Hashable, input_container: DataContainer, output_container: DataContainer
@@ -293,6 +323,8 @@ class GroupApplyTransform(CompositeTransform):
         reassembled = xr.concat(group_outputs, dim=self.group_dim, join="outer")
         reassembled = self._handle_unequal_output_dims(reassembled, group_outputs, fitted=False)
 
+        reassembled = self._restore_input_order(reassembled, container)
+
         # remove the combined group coord
         if len(self.group_coord) > 1:
             reassembled = reassembled.drop_vars(self.combined_group_coord)
@@ -332,7 +364,7 @@ class GroupApplyTransform(CompositeTransform):
             for fitted_transform in self.per_group_fitted.values():
                 group_outputs.append(fitted_transform.transform(group_container, **kwargs))
 
-        # Validate all outputs have identical structure
+        # Validate all outputs have identical dims (sizes along labelled dims, e.g. classes, may differ)
         ref_output = group_outputs[0]
         for i, output in enumerate(group_outputs[1:], 1):
             if output.data.dims != ref_output.data.dims:
@@ -340,27 +372,18 @@ class GroupApplyTransform(CompositeTransform):
                     f"Inconsistent output dimensions for unseen group averaging. "
                     f"Transform {i} has dims {output.data.dims} but reference has {ref_output.data.dims}"
                 )
-            if output.data.shape != ref_output.data.shape:
-                raise TransformError(
-                    f"Inconsistent output shapes for unseen group averaging. "
-                    f"Transform {i} has shape {output.data.shape} but reference has {ref_output.data.shape}"
-                )
 
-        # Compute the average
-        if self.unseen_policy == "average":
-            # Uniform average
-            averaged_data = sum(output.data for output in group_outputs) / len(group_outputs)
-        elif self.unseen_policy == "weighted_average":
-            # Weighted average by training counts
-            total_count = sum(self.train_counts.values())
-            if total_count == 0:
-                # Fallback to uniform if all counts are zero
-                averaged_data = sum(output.data for output in group_outputs) / len(group_outputs)
-            else:
-                weights = [count / total_count for count in self.train_counts.values()]
-                averaged_data = sum(w * output.data for w, output in zip(weights, group_outputs, strict=True))
-
-        return DataContainer(averaged_data)
+        outputs = {g: output.data for g, output in zip(self.per_group_fitted, group_outputs, strict=True)}
+        final_predictor = _final_predictor(next(iter(self.per_group_fitted.values())))
+        if (
+            final_predictor is not None
+            and final_predictor.is_classifier
+            and not final_predictor.is_multilabel
+            and not final_predictor.proba
+        ):
+            # Hard class labels cannot be averaged
+            return DataContainer(self._vote_unseen(outputs))
+        return DataContainer(self._average_unseen(outputs))
 
     def _transform(self, container: DataContainer, **kwargs) -> DataContainer:
         """
@@ -420,11 +443,53 @@ class GroupApplyTransform(CompositeTransform):
         reassembled = xr.concat(group_outputs, dim=self.group_dim, join="outer")
         reassembled = self._handle_unequal_output_dims(reassembled, group_outputs, fitted=True)
 
+        reassembled = self._restore_input_order(reassembled, container)
+
         # remove the combined group coord
         if len(self.group_coord) > 1:
             reassembled = reassembled.drop_vars(self.combined_group_coord)
 
         return DataContainer(reassembled)
+
+    def _restore_input_order(self, reassembled: xr.DataArray, container: DataContainer) -> xr.DataArray:
+        """Put samples back in input order; groups are concatenated one after another, which would
+        otherwise misalign positional consumers (e.g. ensembles, label arrays) with the input."""
+        tag = latest_tag(container.data)
+        restored = restore_positions(reassembled, cast(str, self.group_dim), tag) if tag is not None else None
+        if restored is not None:
+            return restored
+        # The group transform dropped the position tag; fall back to (unique) sample labels
+        input_labels = pd.Index(container.data[self.group_dim].values)
+        return reassembled.sel({self.group_dim: input_labels[input_labels.isin(reassembled[self.group_dim].values)]})
+
+    def _average_unseen(self, outputs: dict[Hashable, xr.DataArray]) -> xr.DataArray:
+        """Average every group model's output for an unseen group, per `unseen_policy`.
+
+        Class coordinates are outer-joined: a class one group model never saw gets probability 0
+        instead of being dropped by xarray's default inner join.
+        """
+        groups = list(outputs)
+        aligned = xr.align(*outputs.values(), join="outer", fill_value=0.0)
+        total = sum(self.train_counts.get(g, 0) for g in groups)
+        if self.unseen_policy == "weighted_average" and total > 0:
+            weights = [self.train_counts.get(g, 0) / total for g in groups]
+        else:
+            weights = [1.0 / len(groups)] * len(groups)
+        return cast(xr.DataArray, sum(w * output for w, output in zip(weights, aligned, strict=True)))
+
+    def _vote_unseen(self, outputs: dict[Hashable, xr.DataArray]) -> xr.DataArray:
+        """Weighted majority vote over hard class labels, for group models without predict_proba."""
+        groups = list(outputs)
+        labels = np.stack([outputs[g].values for g in groups])  # (n_models, n_samples)
+        total = sum(self.train_counts.get(g, 0) for g in groups)
+        if self.unseen_policy == "weighted_average" and total > 0:
+            weights = np.array([self.train_counts.get(g, 0) for g in groups], dtype=float)
+        else:
+            weights = np.ones(len(groups))
+        classes = np.unique(labels)
+        model_axis_weights = weights.reshape(-1, *([1] * (labels.ndim - 1)))  # labels: (n_models, *sample_shape)
+        votes = np.stack([(model_axis_weights * (labels == c)).sum(axis=0) for c in classes])
+        return outputs[groups[0]].copy(data=classes[votes.argmax(axis=0)])
 
     def _handle_unequal_output_dims(
         self, reassembled: xr.DataArray, group_outputs: list[xr.DataArray], fitted: bool = False
@@ -487,13 +552,13 @@ class GroupApplyTransform(CompositeTransform):
 
         # Check that all fitted transforms are predictors
         for group_val, fitted_transform in self.per_group_fitted.items():
-            if not isinstance(fitted_transform, Predictor):
+            if _final_predictor(fitted_transform) is None:
                 raise TypeError(
-                    f"Transform for group '{group_val}' is not a Predictor. "
-                    f"predict() requires all fitted transforms to be Predictors."
+                    f"Transform for group '{group_val}' is not a Predictor or a composite ending in one. "
+                    f"predict() requires all fitted transforms to predict."
                 )
         fitted_predictors = {
-            group_val: cast(Predictor, fitted_transform)
+            group_val: cast("Predictor | CompositeTransform", fitted_transform)
             for group_val, fitted_transform in self.per_group_fitted.items()
         }
 
@@ -519,37 +584,47 @@ class GroupApplyTransform(CompositeTransform):
                         f"Group '{group_val}' was not seen during fit. Seen groups: {self.seen_groups}"
                     )
 
-                # Apply all fitted predictors and average
-                if self.n_jobs != 1:
-                    # Parallel prediction
-                    def predict_with_fitted(fitted_predictor, group_data):
-                        return fitted_predictor.predict(group_data, **kwargs)
+                # Hard class labels cannot be averaged: vote on averaged probabilities when every group
+                # model provides them, otherwise take a weighted majority vote over labels.
+                first_predictor = cast(Predictor, _final_predictor(next(iter(fitted_predictors.values()))))
+                label_classifier = first_predictor.is_classifier and not getattr(
+                    first_predictor, "is_multilabel", False
+                )
+                vote_on_proba = label_classifier and all(
+                    _supports_proba(cast(Predictor, _final_predictor(p))) for p in fitted_predictors.values()
+                )
 
+                def predict_with_fitted(fitted_predictor, group_data):
+                    if vote_on_proba:
+                        return fitted_predictor.predict_proba(group_data, **kwargs)
+                    return fitted_predictor.predict(group_data, **kwargs)
+
+                # Apply all fitted predictors
+                if self.n_jobs != 1:
                     predictions = Parallel(n_jobs=self.n_jobs)(
                         delayed(predict_with_fitted)(fitted_predictor, group_container)
                         for fitted_predictor in fitted_predictors.values()
                     )
                 else:
-                    # Sequential prediction
-                    predictions = []
-                    for fitted_predictor in fitted_predictors.values():
-                        predictions.append(fitted_predictor.predict(group_container, **kwargs))
+                    predictions = [predict_with_fitted(p, group_container) for p in fitted_predictors.values()]
+                outputs = {g: pred.data for g, pred in zip(fitted_predictors, predictions, strict=True)}
 
-                # Average predictions
-                if self.unseen_policy == "average":
-                    averaged_data = sum(pred.data for pred in predictions) / len(predictions)
-                elif self.unseen_policy == "weighted_average":
-                    total_count = sum(self.train_counts.values())
-                    if total_count == 0:
-                        averaged_data = sum(pred.data for pred in predictions) / len(predictions)
-                    else:
-                        weights = [count / total_count for count in self.train_counts.values()]
-                        averaged_data = sum(w * pred.data for w, pred in zip(weights, predictions, strict=True))
+                if vote_on_proba:
+                    averaged = self._average_unseen(outputs)
+                    # argmax + indexing keeps the label dtype (xarray's idxmax casts integer labels to float)
+                    labels = averaged["class"].values[averaged.argmax(dim="class").values]
+                    averaged_data = averaged.isel({"class": 0}, drop=True).copy(data=labels).rename("prediction")
+                elif label_classifier:
+                    averaged_data = self._vote_unseen(outputs)
+                else:
+                    averaged_data = self._average_unseen(outputs)
 
                 group_outputs.append(averaged_data)
 
         # Reassemble predictions
         reassembled = xr.concat(group_outputs, dim=self.group_dim)
+
+        reassembled = self._restore_input_order(reassembled, container)
 
         # remove the combined group coord
         if len(self.group_coord) > 1:
@@ -573,18 +648,19 @@ class GroupApplyTransform(CompositeTransform):
 
         # Check that all fitted transforms are classifiers
         for group_val, fitted_transform in self.per_group_fitted.items():
-            if not isinstance(fitted_transform, Predictor):
+            final_predictor = _final_predictor(fitted_transform)
+            if final_predictor is None:
                 raise TypeError(
-                    f"Transform for group '{group_val}' is not a Predictor. "
-                    f"predict_proba() requires all fitted transforms to be Predictors."
+                    f"Transform for group '{group_val}' is not a Predictor or a composite ending in one. "
+                    f"predict_proba() requires all fitted transforms to predict."
                 )
-            if not fitted_transform.is_classifier:
+            if not final_predictor.is_classifier:
                 raise TypeError(
                     f"Transform for group '{group_val}' is not a classifier. "
                     f"predict_proba() requires all fitted transforms to be classifiers."
                 )
         fitted_predictors = {
-            group_val: cast(Predictor, fitted_transform)
+            group_val: cast("Predictor | CompositeTransform", fitted_transform)
             for group_val, fitted_transform in self.per_group_fitted.items()
         }
 
@@ -626,21 +702,15 @@ class GroupApplyTransform(CompositeTransform):
                     for fitted_predictor in fitted_predictors.values():
                         probabilities.append(fitted_predictor.predict_proba(group_container, **kwargs))
 
-                # Average probabilities
-                if self.unseen_policy == "average":
-                    averaged_data = sum(prob.data for prob in probabilities) / len(probabilities)
-                elif self.unseen_policy == "weighted_average":
-                    total_count = sum(self.train_counts.values())
-                    if total_count == 0:
-                        averaged_data = sum(prob.data for prob in probabilities) / len(probabilities)
-                    else:
-                        weights = [count / total_count for count in self.train_counts.values()]
-                        averaged_data = sum(w * prob.data for w, prob in zip(weights, probabilities, strict=True))
-
+                averaged_data = self._average_unseen(
+                    {g: prob.data for g, prob in zip(fitted_predictors, probabilities, strict=True)}
+                )
                 group_outputs.append(averaged_data)
 
-        # Reassemble probabilities
-        reassembled = xr.concat(group_outputs, dim=self.group_dim)
+        # Reassemble probabilities; a class a group's model never saw has probability 0, not NaN
+        reassembled = xr.concat(group_outputs, dim=self.group_dim, join="outer", fill_value=0.0)
+
+        reassembled = self._restore_input_order(reassembled, container)
 
         # remove the combined group coord
         if len(self.group_coord) > 1:

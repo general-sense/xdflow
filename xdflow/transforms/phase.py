@@ -102,13 +102,16 @@ class HilbertPhaseTransform(Transform):
         self.lfp_pad_ms_at_ends = int(lfp_pad_ms_at_ends)
         self.n_jobs = n_jobs
 
-        # Frequency bands to compute
-        freq_ranges = get_remove_freq_ranges(num_hf_bands_remove, self.DEFAULT_FREQ_RANGES.copy())
-        if num_lf_bands_remove > 0:
-            freq_ranges = get_remove_freq_ranges(num_lf_bands_remove, freq_ranges, remove_high=False)
-        if not freq_ranges:
+        if not self.freq_ranges:
             raise ValueError("No frequency ranges available after filtering configuration")
-        self.freq_ranges: dict[str, tuple[float, float]] = freq_ranges
+
+    @property
+    def freq_ranges(self) -> dict[str, tuple[float, float]]:
+        """Frequency bands to compute, derived on read from the band-removal arguments."""
+        freq_ranges = get_remove_freq_ranges(self.num_hf_bands_remove, self.DEFAULT_FREQ_RANGES.copy())
+        if self.num_lf_bands_remove > 0:
+            freq_ranges = get_remove_freq_ranges(self.num_lf_bands_remove, freq_ranges, remove_high=False)
+        return freq_ranges
 
     def get_expected_output_dims(self, input_dims: tuple[str, ...]) -> tuple[str, ...]:
         dims = [d for d in input_dims if d != "time"]
@@ -307,6 +310,9 @@ class HilbertPhaseTransform(Transform):
 
     def _transform(self, container: DataContainer, **kwargs: Any) -> DataContainer:
         data = container.data
+        if not np.issubdtype(data.dtype, np.floating):
+            # Phases are floats; outputs are cast to the input dtype below, which would truncate integers
+            data = data.astype(np.float64)
 
         # Validate input
         for dim in ("trial", "channel", "time"):
@@ -390,8 +396,8 @@ class HilbertPhaseTransform(Transform):
                 complex_phases = np.exp(1j * window)
                 avg_complex = np.mean(complex_phases, axis=0)  # (time,)
                 avg_phase = np.angle(avg_complex)  # (time,)
-                relative = np.angle(np.exp(1j * (window - avg_phase[np.newaxis, :])))
-                out = np.mean(relative, axis=1)  # (channel,)
+                relative = np.exp(1j * (window - avg_phase[np.newaxis, :]))
+                out = np.angle(np.mean(relative, axis=1))  # circular mean over time, (channel,)
                 return out.astype(trial_data.dtype, copy=False)
 
         # Compute features for each band, concatenating along new freq_band dim

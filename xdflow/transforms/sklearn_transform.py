@@ -7,14 +7,26 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from sklearn.base import BaseEstimator
+from sklearn.base import clone as sklearn_clone
 from sklearn.base import is_classifier as sklearn_is_classifier
 from sklearn.base import is_regressor as sklearn_is_regressor
+from sklearn.multioutput import MultiOutputClassifier, MultiOutputRegressor
 from sklearn.preprocessing import LabelEncoder
 
 from xdflow.core.base import Predictor, SampleWeightMixin, Transform
 from xdflow.core.data_container import DataContainer
-from xdflow.utils.inspection import collect_super_init_param_names
+from xdflow.transforms.multi_output_wrapper import MultiOutputClassifierFactory, MultiOutputRegressorFactory
+from xdflow.utils.inspection import build_estimator, collect_super_init_param_names
 from xdflow.utils.target_utils import extract_target_array, resolve_target_coords
+
+# Fitted CV-diagnostic attributes that predict/predict_proba/transform never read but that can dwarf
+# the model in a pickle (LogisticRegressionCV.coefs_paths_ is n_classes x n_folds x n_Cs x n_features).
+# Deliberately excludes `scores_`: SelectKBest reads it in transform().
+_INFERENCE_UNUSED_ESTIMATOR_ATTRS: tuple[str, ...] = (
+    "coefs_paths_",  # LogisticRegressionCV
+    "cv_results_",  # GridSearchCV / RidgeCV(store_cv_results=True)
+    "mse_path_",  # LassoCV / ElasticNetCV
+)
 
 
 class SKLearnTransform(Transform, SampleWeightMixin):
@@ -32,8 +44,8 @@ class SKLearnTransform(Transform, SampleWeightMixin):
     Notes:
         This class participates in cooperative multiple inheritance with
         `Predictor` through `SKLearnPredictor`. Wrapper hyperparameters should be
-        explicit attributes; estimator kwargs are stored separately in
-        `_estimator_kwargs`.
+        explicit attributes; estimator parameters live only on the wrapped
+        estimator, which `get_params`, `set_params` and `clone` all read.
     """
 
     is_stateful: bool = True
@@ -74,15 +86,14 @@ class SKLearnTransform(Transform, SampleWeightMixin):
         self.sample_weight_coord = sample_weight_coord
         self._fit_param_support_cache: dict[str, bool] = {}
 
-        # Extract estimator-specific parameters (everything not used by Transform or Predictor)
+        # Estimator kwargs are everything not used by Transform or Predictor. They are not kept:
+        # from here on the live estimator is the one source of truth for its parameters.
         if _estimator_instance is not None:
             self.estimator: Any = _estimator_instance
-            self._estimator_kwargs = getattr(self, "_estimator_kwargs", None)
-            if self._estimator_kwargs is None:
-                self._estimator_kwargs = {k: v for k, v in kwargs.items() if k not in parent_param_names}
         else:
-            self._estimator_kwargs = {k: v for k, v in kwargs.items() if k not in parent_param_names}
-            self.estimator: Any = estimator_cls(**self._estimator_kwargs)
+            self.estimator: Any = build_estimator(
+                estimator_cls, {k: v for k, v in kwargs.items() if k not in parent_param_names}
+            )
 
         if not hasattr(self.estimator, "fit"):
             raise TypeError(
@@ -117,9 +128,60 @@ class SKLearnTransform(Transform, SampleWeightMixin):
             raise ValueError("target_coord must be set to resolve supervised targets.")
         return resolve_target_coords(self.target_coord, data)
 
+    def _wrap_for_resolved_targets(self, resolved_targets: list[str]) -> None:
+        """Wrap the estimator for multi-target fitting when a target pattern resolved to several targets.
+
+        Pattern-based target specs (e.g. ``"out_*"``) are resolved only at fit time, after construction-time
+        wrapping was decided.
+        """
+        if (
+            hasattr(self, "multi_output")
+            and not self.multi_output  # Not already wrapped (only for Predictors)
+            and hasattr(self, "is_classifier")
+            and len(resolved_targets) > 1  # Pattern resolved to multiple targets
+            and isinstance(self.target_coord, str)
+            and "*" in self.target_coord  # Was a pattern
+            and hasattr(self, "_base_estimator_cls")
+            and inspect.isclass(self._base_estimator_cls)  # Skip lambdas/callables
+        ):
+            live_params = sklearn_clone(self.estimator).get_params(deep=False)
+            if getattr(self, "is_multilabel", False):
+                estimator_cls = MultiOutputClassifierFactory(cast(type[BaseEstimator], self._base_estimator_cls))
+                self.estimator = estimator_cls(**live_params)
+                self.multi_output = True
+            elif not self.is_classifier:
+                estimator_cls = MultiOutputRegressorFactory(cast(type[BaseEstimator], self._base_estimator_cls))
+                self.estimator = estimator_cls(**live_params)
+                self.multi_output = True
+
+    def _record_fit_labels(self, data: xr.DataArray) -> None:
+        """Remember the labels of every non-sample dimension seen at fit (e.g. features or channels)."""
+        self._fit_labels = {
+            dim: data.indexes[dim] for dim in data.dims if dim != self.sample_dim and dim in data.indexes
+        }
+
+    def _align_to_fit(self, data: xr.DataArray) -> xr.DataArray:
+        """Order every non-sample dimension as it was at fit.
+
+        The estimator sees values by position, so input whose features or channels arrive in another order
+        would otherwise be silently mis-assigned. Labels missing from the new data raise.
+        """
+        for dim, fitted in getattr(self, "_fit_labels", {}).items():
+            if dim not in data.indexes or data.indexes[dim].equals(fitted):
+                continue
+            positions = data.indexes[dim].get_indexer(fitted)
+            if (positions < 0).any():
+                missing = list(fitted[positions < 0][:5])
+                raise ValueError(
+                    f"{type(self).__name__} was fitted with '{dim}' labels missing from this data: {missing}"
+                )
+            data = data.isel({dim: positions})
+        return data
+
     def _fit(self, container: DataContainer, **kwargs) -> "SKLearnTransform":
         """Fits the scikit-learn estimator (supervised or unsupervised)."""
         data = container.data
+        self._record_fit_labels(data)
         X, sample_index = self._prepare_data(data)
 
         y = None
@@ -129,31 +191,7 @@ class SKLearnTransform(Transform, SampleWeightMixin):
             self._resolved_target_coords = resolved_targets
             y = extract_target_array(resolved_targets, data, validate=False)
 
-            # Check if we need to wrap in a multi-output wrapper for patterns that resolved
-            # to multiple targets. Pattern-based target specs are resolved only at fit time.
-            if (
-                hasattr(self, "multi_output")
-                and not self.multi_output  # Not already wrapped (only for Predictors)
-                and hasattr(self, "is_classifier")
-                and len(resolved_targets) > 1  # Pattern resolved to multiple targets
-                and isinstance(self.target_coord, str)
-                and "*" in self.target_coord  # Was a pattern
-                and hasattr(self, "_base_estimator_cls")
-                and inspect.isclass(self._base_estimator_cls)  # Skip lambdas/callables
-            ):
-                from xdflow.transforms.multi_output_wrapper import (
-                    MultiOutputClassifierFactory,
-                    MultiOutputRegressorFactory,
-                )
-
-                if getattr(self, "is_multilabel", False):
-                    estimator_cls = MultiOutputClassifierFactory(cast(type[BaseEstimator], self._base_estimator_cls))
-                    self.estimator = estimator_cls(**dict(cast(dict[str, Any], self._estimator_kwargs)))
-                    self.multi_output = True
-                elif not self.is_classifier:
-                    estimator_cls = MultiOutputRegressorFactory(cast(type[BaseEstimator], self._base_estimator_cls))
-                    self.estimator = estimator_cls(**dict(cast(dict[str, Any], self._estimator_kwargs)))
-                    self.multi_output = True
+            self._wrap_for_resolved_targets(resolved_targets)
 
         # If supervised, delegate any encoding decisions to Predictor upstream
         fit_kwargs = self._build_fit_kwargs(data, sample_index)
@@ -179,72 +217,90 @@ class SKLearnTransform(Transform, SampleWeightMixin):
                 self.estimator.fit(X, **fit_kwargs)
         return self
 
+    def _clone_estimator_cls(self) -> Any:
+        """The estimator class ``clone()`` rebuilds from (the unwrapped class after automatic multi-output wrapping)."""
+        if hasattr(self, "_base_estimator_cls") and hasattr(self, "multi_output"):
+            return self._base_estimator_cls
+        return self.estimator_cls
+
+    def _param_estimator(self) -> Any:
+        """The estimator whose parameters this wrapper exposes and clones.
+
+        An automatic ``MultiOutput*`` wrapper (``multi_output``, a factory, or a fit-time pattern) is
+        looked through, because ``clone()`` rebuilds it from the inner model's parameters. Only when
+        ``estimator_cls`` is ``MultiOutputRegressor``/``MultiOutputClassifier`` itself does ``clone()``
+        need the wrapper's own parameters.
+        """
+        estimator = self.__dict__.get("estimator")
+        if estimator is None:
+            return None
+        if self._clone_estimator_cls() in (MultiOutputClassifier, MultiOutputRegressor):
+            return estimator
+        # Look through wrappers xdflow added (automatic multi_output or its factories); a user-supplied wrapper
+        # factory such as functools.partial(MultiOutputRegressor, ...) is cloned with the wrapper's own params.
+        added_by_xdflow = getattr(self, "multi_output", False) or isinstance(
+            self._clone_estimator_cls(), (MultiOutputClassifierFactory, MultiOutputRegressorFactory)
+        )
+        if added_by_xdflow and isinstance(estimator, (MultiOutputClassifier, MultiOutputRegressor)):
+            return estimator.estimator
+        return estimator
+
     def get_params(self, deep: bool = True) -> dict[str, Any]:
-        """
-        Get parameters for this transform, including the wrapped estimator.
-        This is part of the scikit-learn estimator API.
-        """
-        # Get parameters from the wrapper itself
+        """Wrapper parameters plus the live parameters of the wrapped estimator."""
         params = super().get_params(deep=deep)
-        if hasattr(self, "estimator"):
-            # Get parameters from the wrapped estimator
-            estimator_params = self.estimator.get_params(deep=deep)
-            params.update(estimator_params)
+        estimator = self._param_estimator()
+        if estimator is not None:
+            params.update(estimator.get_params(deep=deep))
         return params
 
     def set_params(self, **params: Any) -> "SKLearnTransform":
-        """
-        Set the parameters of this transform and its wrapped estimator.
-        This is part of the scikit-learn estimator API.
-        """
-        estimator_params = {}
-        wrapper_params = {}
-
-        # Separate parameters for the estimator and the wrapper
-        for key, value in params.items():
-            if hasattr(self, "estimator") and key in self.estimator.get_params(deep=True):
-                estimator_params[key] = value
-            else:
-                wrapper_params[key] = value
-
-        # Set parameters on the estimator
-        if hasattr(self, "estimator") and estimator_params:
-            self.estimator.set_params(**estimator_params)
-
-        # Set parameters on the wrapper
-        super().set_params(**wrapper_params)
-
+        """Route estimator parameters to the live estimator and the rest to the wrapper."""
+        estimator = self._param_estimator()
+        owned = estimator.get_params(deep=True) if estimator is not None else {}
+        if estimator is not None and estimator is not self.__dict__.get("estimator"):
+            # Automatic MultiOutput wrapper: `estimator__x` means the inner model's x. The wrapper itself is
+            # rebuilt by clone(), so writes to its own params would be silently lost.
+            translated = {}
+            for key, value in params.items():
+                if key.startswith("estimator__"):
+                    key = key[len("estimator__") :]
+                    if key not in owned:
+                        raise ValueError(
+                            f"'estimator__{key}' targets the automatic MultiOutput wrapper, which clone() rebuilds; "
+                            "set the inner model's parameters instead."
+                        )
+                translated[key] = value
+            params = translated
+        estimator_params = {k: v for k, v in params.items() if k in owned}
+        if estimator_params:
+            estimator.set_params(**estimator_params)
+        super().set_params(**{k: v for k, v in params.items() if k not in owned})
         return self
 
     def __setattr__(self, name: str, value: Any) -> None:
-        """
-        Override setattr to act as a proxy.
-
-        If the attribute is a parameter of the underlying estimator, set it there.
-        Otherwise, set it on the wrapper.
-        """
-        if hasattr(self, "estimator") and name in self.estimator.get_params():
-            setattr(self.estimator, name, value)
+        """Proxy assignment of estimator parameters (``wrapper.alpha = 5``) onto the live estimator."""
+        estimator = self._param_estimator()
+        if (
+            estimator is not None
+            and name != "estimator"
+            and not name.startswith("_")
+            and name in estimator.get_params()
+        ):
+            estimator.set_params(**{name: value})
         else:
             super().__setattr__(name, value)
 
-    def __hasattr__(self, name: str) -> bool:
-        """
-        Override hasattr to check if the parameter exists either on the wrapper or the estimator.
-        """
-        if name in ["estimator", "sample_dim", "target_coord"]:
-            return name in self.__dict__ or hasattr(type(self), name)
-        return hasattr(self.estimator, name) or name in self.__dict__ or hasattr(type(self), name)
-
     def _get_clone_kwargs(self) -> dict[str, Any]:
-        """Include estimator parameters in clone kwargs."""
-        filtered_params = super()._get_clone_kwargs()
+        """Constructor kwargs plus the estimator's *current* parameters.
 
-        # For SKLearnPredictor with multi_output, use the base estimator class
-        if hasattr(self, "_base_estimator_cls") and hasattr(self, "multi_output"):
-            filtered_params["estimator_cls"] = self._base_estimator_cls
-
-        return {**filtered_params, **dict(cast(dict[str, Any], self._estimator_kwargs))}
+        Read live rather than from a construction-time snapshot, so ``set_params`` survives ``clone()``
+        (cross-validation clones once per fold). ``sklearn.base.clone`` drops fitted state and copies
+        nested estimators instead of sharing them with the original.
+        """
+        kwargs = super()._get_clone_kwargs()
+        if "estimator_cls" in kwargs:  # subclasses that fix their estimator class do not take it
+            kwargs["estimator_cls"] = self._clone_estimator_cls()
+        return {**kwargs, **sklearn_clone(self._param_estimator()).get_params(deep=False)}
 
     def _build_fit_kwargs(self, data: xr.DataArray, sample_index: pd.Index) -> dict[str, Any]:
         """Collect optional keyword arguments to forward to estimator.fit."""
@@ -280,6 +336,12 @@ class SKLearnTransform(Transform, SampleWeightMixin):
                 self._fit_param_support_cache[param_name] = accepts
         return self._fit_param_support_cache[param_name]
 
+    def _disable_for_inference(self) -> None:
+        """Drop CV-diagnostic estimator attributes during ``prepare_for_inference`` to keep pickles small."""
+        for attr in _INFERENCE_UNUSED_ESTIMATOR_ATTRS:
+            if hasattr(self.estimator, attr):
+                delattr(self.estimator, attr)
+
     # _extract_sample_weights is inherited from SampleWeightMixin
 
 
@@ -303,6 +365,7 @@ class SKLearnTransformer(SKLearnTransform):
         output_dim_name: str = "component",
         sel: dict[str, Any] | None = None,
         drop_sel: dict[str, Any] | None = None,
+        sample_weight_coord: str | None = "sample_weight",
         **kwargs: Any,
     ):
         """Initialize a transformer wrapper.
@@ -315,6 +378,7 @@ class SKLearnTransformer(SKLearnTransform):
             output_dim_name: Name of the non-sample output dimension.
             sel: Label selection applied before fitting or transforming.
             drop_sel: Label selection dropped before fitting or transforming.
+            sample_weight_coord: Coordinate containing optional sample weights.
             **kwargs: Parent-class options and estimator constructor arguments.
         """
         super().__init__(
@@ -323,6 +387,7 @@ class SKLearnTransformer(SKLearnTransform):
             target_coord=target_coord,
             sel=sel,
             drop_sel=drop_sel,
+            sample_weight_coord=sample_weight_coord,
             **kwargs,
         )
         self.output_dim_name = output_dim_name
@@ -333,7 +398,7 @@ class SKLearnTransformer(SKLearnTransform):
 
     def _transform(self, container: DataContainer, **kwargs) -> DataContainer:
         """Applies the estimator's transform method to the data."""
-        data = container.data
+        data = self._align_to_fit(container.data)
         X, sample_index = self._prepare_data(data)
 
         transformed_data = self.estimator.transform(X)
@@ -358,6 +423,20 @@ class SKLearnTransformer(SKLearnTransform):
         if len(input_dims) != 2:
             raise ValueError(f"Expected 2 input dimensions, but got {len(input_dims)}")
         return (self.sample_dim, self.output_dim_name)
+
+
+class _EstimatorTemplate:
+    """Picklable factory building fresh clones of an estimator instance, with parameter overrides."""
+
+    def __init__(self, estimator: BaseEstimator):
+        self.estimator = estimator
+        self.__name__ = type(estimator).__name__
+
+    def __call__(self, **params: Any) -> BaseEstimator:
+        return sklearn_clone(self.estimator).set_params(**params)
+
+    def __repr__(self) -> str:
+        return f"_EstimatorTemplate({self.estimator!r})"
 
 
 class SKLearnPredictor(SKLearnTransform, Predictor):
@@ -410,12 +489,12 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
         """
         parent_param_names = collect_super_init_param_names(type(self), SKLearnTransform)
         # Separate kwargs for the estimator from the rest
-        self._estimator_kwargs = {k: v for k, v in kwargs.items() if k not in parent_param_names}
+        estimator_kwargs = {k: v for k, v in kwargs.items() if k not in parent_param_names}
 
         # Store the original estimator class before potential wrapping
         self._base_estimator_cls = estimator_cls
 
-        _base_instance = estimator_cls(**self._estimator_kwargs)
+        _base_instance = build_estimator(estimator_cls, estimator_kwargs)
 
         # Auto-detect or use manual override before deciding on multi-output wrapping.
         if is_classifier is None:
@@ -460,7 +539,7 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
                         "for multi-target prediction"
                     )
 
-            _estimator_instance = estimator_cls(**self._estimator_kwargs)
+            _estimator_instance = build_estimator(estimator_cls, estimator_kwargs)
         else:
             _estimator_instance = _base_instance
 
@@ -493,13 +572,40 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
 
     # _transform implemented by Predictor
 
+    @classmethod
+    def from_estimator(
+        cls, estimator: BaseEstimator, sample_dim: str, target_coord: str | list[str], **kwargs: Any
+    ) -> "SKLearnPredictor":
+        """Wrap an existing scikit-learn estimator or ``Pipeline`` instance, e.g. one you already use.
+
+        The instance is a template: it is cloned, never fitted or mutated, and its parameters stay tunable
+        through ``set_params`` (``"lda__solver"`` for a step of a wrapped Pipeline). Input with more than two
+        dims is passed sample-first, so pipelines that take ``(trial, channel, time)`` arrays, such as
+        ``make_pipeline(mne.decoding.CSP(), LinearDiscriminantAnalysis())``, work unchanged.
+
+        Args:
+            estimator: An unfitted scikit-learn estimator or Pipeline.
+            sample_dim: Dimension whose entries are samples.
+            target_coord: Target coordinate name(s).
+            **kwargs: Other ``SKLearnPredictor`` options (``proba``, ``is_classifier``, ...).
+        """
+        return cls(_EstimatorTemplate(estimator), sample_dim=sample_dim, target_coord=target_coord, **kwargs)
+
+    def _prepare_data(self, data: xr.DataArray) -> tuple[np.ndarray, pd.Index]:
+        """Sample dimension first. Input with more than two dims is passed through as is, for estimators
+        (or Pipelines) that take N-D arrays; estimators that need 2-D input reject it themselves."""
+        if self.sample_dim not in data.dims:
+            raise ValueError(f"Sample dimension '{self.sample_dim}' not found in data dims {data.dims}.")
+        data = data.transpose(self.sample_dim, ...)
+        return data.values, data.coords[self.sample_dim]
+
     def _predict(self, data: xr.DataArray, **kwargs) -> np.ndarray:
         """
         Implements the core prediction logic, returning the predictions (based on target_coord values)
         """
         if not hasattr(self.estimator, "predict"):
             raise AttributeError(f"Estimator '{self.estimator.__class__.__name__}' has no method 'predict'.")
-        X, _ = self._prepare_data(data)
+        X, _ = self._prepare_data(self._align_to_fit(data))
         return self.estimator.predict(X)
 
     def _predict_proba(self, data: xr.DataArray, **kwargs) -> tuple[np.ndarray, np.ndarray]:
@@ -514,7 +620,7 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
         """
         if not hasattr(self.estimator, "predict_proba"):
             raise AttributeError(f"Estimator '{self.estimator.__class__.__name__}' has no method 'predict_proba'.")
-        X, _ = self._prepare_data(data)
+        X, _ = self._prepare_data(self._align_to_fit(data))
         raw_probabilities = self.estimator.predict_proba(X)
 
         if self.is_multilabel:
@@ -531,8 +637,8 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
         Determines the expected output dimensions for the `.transform()` method.
         The public `.predict()` method will always produce a 1D output.
         """
-        if len(input_dims) != 2:
-            raise ValueError(f"Expected 2 input dimensions, but got {len(input_dims)}")
+        if self.sample_dim not in input_dims:
+            raise ValueError(f"Input dims {input_dims} must include the sample dimension '{self.sample_dim}'.")
 
         if self.proba and not self.is_multilabel:
             return (self.sample_dim, "class")

@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 from xdflow.composite.base import CompositeTransform, TransformStep
 from xdflow.composite.pipeline import Pipeline
 from xdflow.core.base import Predictor, Transform
@@ -307,3 +309,9 @@ class OptionalTransform(SwitchTransform):
             choices=[(transform_choice_name, transform_template), (self.skip_name, identity_transform)],
             choose=resolved_choose,
         )
+
+    def set_params(self, **params: Any) -> "OptionalTransform":
+        # `use` is shorthand for `choose`; map it so the live object and its clone follow it
+        if params.get("use") is not None and "choose" not in params:
+            params = {**params, "choose": self.choices[0].name if params["use"] else self.skip_name}
+        return cast("OptionalTransform", super().set_params(**params))

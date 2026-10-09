@@ -17,6 +17,27 @@ from xdflow.core.base import Transform
 from xdflow.core.data_container import DataContainer
 
 
+def _select_fit_labels(data_array: xr.DataArray, dim: str, fit_labels: np.ndarray | None) -> xr.DataArray:
+    """Order `dim` as it was at fit; fitted matrices are applied by position, so a reordered or
+    different set of labels would otherwise be silently mis-projected (missing labels raise)."""
+    if fit_labels is None or dim not in data_array.indexes:
+        return data_array
+    return data_array.sel({dim: fit_labels})
+
+
+def _fit_labels(data_array: xr.DataArray, dim: str) -> np.ndarray | None:
+    return data_array[dim].values.copy() if dim in data_array.indexes else None
+
+
+def _center_mode_for(center_data: bool | str) -> str:
+    """Normalize `center_data` to "true", "false" or "false_oldstyle"; raise on anything else."""
+    if isinstance(center_data, bool):
+        return "true" if center_data else "false"
+    if isinstance(center_data, str) and center_data.lower() == "false_oldstyle":
+        return "false_oldstyle"
+    raise ValueError("center_data must be True, False, or 'false_oldstyle'.")
+
+
 class GlobalFeaturePCA(Transform):
     """Performs global PCA across features while preserving time structure.
 
@@ -90,13 +111,7 @@ class GlobalFeaturePCA(Transform):
 
         self.n_components = n_components
         self.pca_frac_to_keep = float(pca_frac_to_keep) if pca_frac_to_keep is not None else None
-        # Normalize centering mode
-        if isinstance(center_data, bool):
-            self._center_mode = "true" if center_data else "false"
-        elif isinstance(center_data, str) and center_data.lower() == "false_oldstyle":
-            self._center_mode = "false_oldstyle"
-        else:
-            raise ValueError("center_data must be True, False, or 'false_oldstyle'.")
+        _center_mode_for(center_data)  # validate now; `_center_mode` derives it on read
         self.center_data = center_data  # keep original for introspection
         self.whiten = bool(whiten)
 
@@ -104,11 +119,21 @@ class GlobalFeaturePCA(Transform):
         self.components_: np.ndarray | None = None  # shape: (k, n_features)
         self.feature_mean = None  # xarray DataArray of shape (feature,)
 
-        # set up dims
-        self.input_dims = ("trial", feature_dim, time_dim)
-        self.output_dims = ("trial", feature_dim, time_dim)
         self.time_dim = time_dim
         self.feature_dim = feature_dim
+
+    @property
+    def input_dims(self) -> tuple[str, ...]:
+        return ("trial", self.feature_dim, self.time_dim)
+
+    @property
+    def output_dims(self) -> tuple[str, ...]:
+        return ("trial", self.feature_dim, self.time_dim)
+
+    @property
+    def _center_mode(self) -> str:
+        """`center_data` normalized, derived on read so `set_params(center_data=...)` reaches it."""
+        return _center_mode_for(self.center_data)
 
     def get_expected_output_dims(self, input_dims: tuple[str, ...]) -> tuple[str, ...]:
         return self.output_dims
@@ -123,6 +148,7 @@ class GlobalFeaturePCA(Transform):
             Self.
         """
         data_array = container.data
+        self._fit_feature_labels = _fit_labels(data_array, self.feature_dim)
 
         # Save mean if needed (vector of length feature)
         if self._center_mode == "true":
@@ -208,6 +234,7 @@ class GlobalFeaturePCA(Transform):
             raise RuntimeError("The transform has not been fitted yet. Call 'fit' before 'transform'.")
 
         data_array = container.data
+        data_array = _select_fit_labels(data_array, self.feature_dim, getattr(self, "_fit_feature_labels", None))
         data_ctt = data_array.transpose(self.feature_dim, "trial", self.time_dim)
         X = data_ctt.values.reshape(data_ctt.sizes[self.feature_dim], -1)
 

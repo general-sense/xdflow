@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 import xarray as xr
@@ -6,6 +7,7 @@ from sklearn.linear_model import LinearRegression
 
 from xdflow.core.base import Transform
 from xdflow.core.data_container import DataContainer
+from xdflow.transforms.normalization import _stat_dims, _warn_if_pooling_trials
 
 
 def _signal_channel_mask(channel_values: np.ndarray, excluded_channels: Sequence[str] | None) -> np.ndarray:
@@ -43,8 +45,11 @@ class CARTransform(Transform):
     ):
         super().__init__(sel=sel, drop_sel=drop_sel)
         self.car_method = car_method
-        self.excluded_channels = excluded_channels  # for clone
-        self._excluded_channels = tuple(excluded_channels or ())
+        self.excluded_channels = excluded_channels
+
+    @property
+    def _excluded_channels(self) -> tuple[str, ...]:
+        return tuple(self.excluded_channels or ())
 
     def _transform(self, data_container: DataContainer, **kwargs) -> DataContainer:
         """
@@ -75,9 +80,12 @@ class RegressOutReferenceTransform(Transform):
 
     Uses linear regression to model the relationship between the reference signal
     and each target channel, then subtracts the predicted component.
+
+    By default the regression is fit on the data being transformed, pooling all trials. With
+    `use_fit=True` it is learned during `fit` and reused during `transform`, which keeps validation
+    trials out of the fit inside cross-validation.
     """
 
-    is_stateful: bool = False
     input_dims: tuple[str, ...] = ("trial", "channel", "time")
     output_dims: tuple[str, ...] = ("trial", "channel", "time")
 
@@ -85,6 +93,7 @@ class RegressOutReferenceTransform(Transform):
         self,
         reference_channel: str,
         excluded_channels: Sequence[str] | None = None,
+        use_fit: bool = False,
         sel: dict[str, object] | None = None,
         drop_sel: dict[str, object] | None = None,
     ):
@@ -92,39 +101,53 @@ class RegressOutReferenceTransform(Transform):
             raise ValueError("reference_channel must be provided.")
         super().__init__(sel=sel, drop_sel=drop_sel)
         self.reference_channel = reference_channel
-        self.excluded_channels = excluded_channels  # for clone
-        extras = tuple(excluded_channels or ())
-        self._excluded_channels = tuple(set(extras) | {reference_channel})
+        self.excluded_channels = excluded_channels
+        self.use_fit = use_fit
+
+    @property
+    def is_stateful(self) -> bool:  # type: ignore[override]
+        return self.use_fit
+
+    @property
+    def _excluded_channels(self) -> tuple[str, ...]:
+        return tuple(set(self.excluded_channels or ()) | {self.reference_channel})
+
+    def _fit_models(self, data: xr.DataArray) -> dict[Any, LinearRegression]:
+        """One reference->channel regression per target channel, pooling trials and time."""
+        if self.reference_channel not in data.coords["channel"]:
+            raise ValueError(f"Reference channel '{self.reference_channel}' not present in data.")
+        ref_signal_flat = data.sel(channel=self.reference_channel).values.reshape(-1, 1)
+        channel_values = np.asarray(data.coords["channel"].values)
+        target_channels = channel_values[_signal_channel_mask(channel_values, self._excluded_channels)]
+        return {
+            chan: LinearRegression().fit(ref_signal_flat, data.sel(channel=chan).values.ravel())
+            for chan in target_channels
+        }
+
+    def _fit(self, data_container: DataContainer, **kwargs) -> "RegressOutReferenceTransform":
+        self._models = self._fit_models(data_container.data)
+        return self
 
     def _transform(self, data_container: DataContainer, **kwargs) -> DataContainer:
         """Apply the reference regression."""
         data = data_container.data.copy(deep=True)
+        if self.use_fit:
+            models = self._models
+            channel_values = np.asarray(data.coords["channel"].values)
+            targets = channel_values[_signal_channel_mask(channel_values, self._excluded_channels)]
+            unfitted = [chan for chan in targets if chan not in models]
+            if unfitted:
+                raise ValueError(
+                    f"No reference regression was fitted for channel(s) {unfitted}; refit on these channels."
+                )
+        else:
+            _warn_if_pooling_trials(self, ["trial"])
+            models = self._fit_models(data)
 
-        if self.reference_channel not in data.coords["channel"]:
-            raise ValueError(f"Reference channel '{self.reference_channel}' not present in data.")
-
-        ref_signal_da = data.sel(channel=self.reference_channel)
-        ref_signal_flat = ref_signal_da.values.reshape(-1, 1)
-
-        channel_values = np.asarray(data.coords["channel"].values)
-        target_mask = _signal_channel_mask(channel_values, self._excluded_channels)
-        target_channels = channel_values[target_mask]
-        for chan in target_channels:
+        ref_signal_flat = data.sel(channel=self.reference_channel).values.reshape(-1, 1)
+        for chan, model in models.items():
             lfp_signal_da = data.sel(channel=chan)
-            lfp_signal_flat = lfp_signal_da.values.flatten()
-
-            model = LinearRegression()
-            model.fit(ref_signal_flat, lfp_signal_flat)
-            predicted_flat = model.predict(ref_signal_flat)
-
-            predicted_reshaped = predicted_flat.reshape(lfp_signal_da.shape)
-            predicted_da = xr.DataArray(
-                predicted_reshaped,
-                dims=lfp_signal_da.dims,
-                coords=lfp_signal_da.coords,
-                attrs=lfp_signal_da.attrs,
-            )
-            data.loc[{"channel": chan}] -= predicted_da
+            data.loc[{"channel": chan}] -= model.predict(ref_signal_flat).reshape(lfp_signal_da.shape)
         return DataContainer(data)
 
 
@@ -156,6 +179,11 @@ class RemoveOutliersTransform(Transform):
     output_dims: tuple[str, ...] = ()
     _supports_transform_sel: bool = True
 
+    @property
+    def is_stateful(self) -> bool:  # type: ignore[override]
+        # Derived from use_fit so set_params(use_fit=...) and clone() stay consistent.
+        return self.use_fit
+
     def __init__(
         self,
         per_dim: str | list[str] | tuple[str, ...],
@@ -170,7 +198,6 @@ class RemoveOutliersTransform(Transform):
         self.std_threshold = std_threshold
         self.per_dim = per_dim
         self.use_fit = use_fit
-        self.is_stateful = self.use_fit
 
     def _fit(self, data_container: DataContainer, **kwargs) -> "RemoveOutliersTransform":
         """
@@ -181,8 +208,7 @@ class RemoveOutliersTransform(Transform):
         the data it is given.
         """
         if self.use_fit:
-            per_dims = _normalize_per_dim(self.per_dim)
-            mean_dims = [d for d in data_container.data.dims if d not in per_dims]
+            mean_dims = _stat_dims(self.per_dim, data_container.data.dims)
             self.mean = data_container.data.mean(dim=mean_dims)
             self.std = data_container.data.std(dim=mean_dims)
         return self
@@ -204,8 +230,8 @@ class RemoveOutliersTransform(Transform):
             mean = self.mean
             std = self.std
         else:
-            per_dims = _normalize_per_dim(self.per_dim)
-            mean_dims = [d for d in data.dims if d not in per_dims]
+            mean_dims = _stat_dims(self.per_dim, data.dims)
+            _warn_if_pooling_trials(self, mean_dims)
             mean = data.mean(dim=mean_dims)
             std = data.std(dim=mean_dims)
         lower_bound = mean - std_threshold * std

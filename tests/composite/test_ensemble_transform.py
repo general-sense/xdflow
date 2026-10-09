@@ -13,6 +13,7 @@ from xdflow.composite.base import TransformStep
 from xdflow.composite.ensemble import EnsembleMember, EnsemblePredictor
 from xdflow.core.base import Predictor, Transform
 from xdflow.core.data_container import DataContainer
+from xdflow.cv import KFoldValidator
 from xdflow.transforms.basic_transforms import IdentityTransform
 
 
@@ -133,7 +134,7 @@ class MockPredictor(Predictor):
         return self.output_dims
 
     def get_params(self, deep=False):
-        return {"name": self.name, "prediction_bias": self.prediction_bias}
+        return {"name": self.name, "prediction_bias": self.prediction_bias, "is_classifier": self.is_classifier}
 
 
 class MarkerTransform(Transform):
@@ -660,6 +661,21 @@ class TestEnsembleRepresentation:
 class TestEnsembleWithPipelines:
     def _make_pipeline(self, name: str, predictor: Predictor) -> Pipeline:
         return Pipeline(name=name, steps=[("identity", IdentityTransform()), ("predict", predictor)])
+
+    def test_cross_validate_pipeline_ending_in_ensemble(self, sample_predictor_container):
+        """A terminal EnsemblePredictor must satisfy the Pipeline.fit() contract used by CV (fit_transform)."""
+        ensemble = EnsemblePredictor(
+            members=[("p1", MockPredictor("p1")), ("p2", MockPredictor("p2", prediction_bias=0.1))],
+            sample_dim="trial",
+            target_coord="label",
+        )
+        cv = KFoldValidator(n_splits=3, use_stateful_fit_cache=False, verbose=False)
+        cv.set_pipeline(Pipeline("ensemble_cv", [("ensemble", ensemble)]))
+
+        score = cv.cross_validate(sample_predictor_container, verbose=False)
+
+        assert isinstance(score, float)
+        assert len(cv.cv_scores_) == 3
 
     def test_pipeline_members_predict(self, sample_predictor_container):
         predictor1 = MockPredictor("p1", prediction_bias=0.0)

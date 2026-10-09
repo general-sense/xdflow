@@ -38,3 +38,27 @@ def test_sklearn_adapter_split_indices():
     train_idx, val_idx = splits[0]
     assert np.array_equal(train_idx, np.array([0, 1]))
     assert np.array_equal(val_idx, np.array([2, 3]))
+
+
+def test_split_count_follows_the_current_container():
+    from xdflow.cv import LeaveGroupOutValidator
+
+    def make(n_sessions):
+        n = 10 * n_sessions
+        return DataContainer(
+            xr.DataArray(
+                np.zeros((n, 2)),
+                dims=("trial", "feature"),
+                coords={
+                    "trial": np.arange(n),
+                    "feature": [0, 1],
+                    "y": ("trial", np.tile(["a", "b"], n // 2)),
+                    "session": ("trial", np.repeat([f"s{i}" for i in range(n_sessions)], 10)),
+                },
+            )
+        )
+
+    adapter = SklearnCVAdapter(LeaveGroupOutValidator(group_coord="session", verbose=False))
+    for n_sessions in (3, 5):
+        with set_cv_container(make(n_sessions)):
+            assert adapter.get_n_splits() == len(list(adapter.split(None))) == n_sessions

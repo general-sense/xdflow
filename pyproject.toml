@@ -70,6 +70,9 @@ spectral = [
 # Domain adaptation
 adaptation = ["adapt>=0.4.0"]
 
+# MNE-Python interop (CSPTransform)
+mne = ["mne>=1.6"]
+
 # All extras
 all = [
     "lightgbm>=4.0.0",
@@ -82,6 +85,7 @@ all = [
     "nitime>=0.10",
     "spectral-connectivity>=2,<3",
     "adapt>=0.4.0",
+    "mne>=1.6",
     "netcdf4",
 ]
 
@@ -89,7 +93,7 @@ all = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
-    "ruff>=0.1.0",
+    "ruff>=0.16",
     "ty>=0.0.1a1",
     "pre-commit>=3.0.0",
     "ipython>=8.0.0",
@@ -106,10 +110,10 @@ docs = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/canaery/xdflow"
+Homepage = "https://github.com/general-sense/xdflow"
 Documentation = "https://xdflow.readthedocs.io"
-Repository = "https://github.com/canaery/xdflow"
-"Bug Tracker" = "https://github.com/canaery/xdflow/issues"
+Repository = "https://github.com/general-sense/xdflow"
+"Bug Tracker" = "https://github.com/general-sense/xdflow/issues"
 
 [build-system]
 requires = ["hatchling"]

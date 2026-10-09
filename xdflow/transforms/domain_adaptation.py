@@ -44,7 +44,7 @@ and JointGroupStrategy would inherit from both SingleTargetAligner and JointGrou
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Hashable
-from inspect import Parameter, _empty, signature
+from inspect import Parameter, signature
 from typing import Any
 
 import numpy as np
@@ -54,8 +54,9 @@ from joblib import Parallel, delayed
 from sklearn.cross_decomposition import CCA
 from sklearn.metrics.pairwise import cosine_similarity, linear_kernel, polynomial_kernel, rbf_kernel
 
-from xdflow.core.base import Transform
+from xdflow.core.base import Transform, _init_param_names
 from xdflow.core.data_container import DataContainer, TransformError
+from xdflow.utils.positions import latest_tag, restore_positions, tag_positions
 from xdflow.utils.sampling import get_container_by_conditions, stratified_sample
 
 ########################################################################################
@@ -64,6 +65,8 @@ from xdflow.utils.sampling import get_container_by_conditions, stratified_sample
 
 
 # Base class for all domain adaptation strategies
+
+
 class AdaptiveStrategy(ABC):
     """
     Abstract base class for domain adaptation strategies.
@@ -86,6 +89,7 @@ class AdaptiveStrategy(ABC):
         self.group_coord = group_coord
         self.n_jobs = n_jobs
         self.adapt_sel = adapt_sel
+        self.group_dim: str | None = None  # set by the subclass during adapt
 
     def adapt(self, aligner: "AdaptiveTransform", container: DataContainer, **kwargs):
         """
@@ -143,9 +147,24 @@ class AdaptiveStrategy(ABC):
 
     def _select_group(self, container: DataContainer, group_val: Hashable) -> DataContainer:
         """Selects data for a specific group using boolean indexing."""
-        group_mask = container.data.coords[self.group_coord] == group_val
-        group_data = container.data.where(group_mask, drop=True)
-        return DataContainer(group_data)
+        # Positional boolean indexing; `where(drop=True)` would cast int data to float
+        group_mask = container.data.coords[self.group_coord].values == group_val
+        return DataContainer(container.data.isel({self._get_group_dim(container): group_mask}))
+
+    def _tag_positions(self, container: DataContainer) -> DataContainer:
+        """Record each sample's input position so outputs can be reordered even without unique labels."""
+        dim = self._get_group_dim(container)
+        return DataContainer(tag_positions(container.data, dim)[0])
+
+    def _restore_input_order(self, reassembled: xr.DataArray, container: DataContainer) -> xr.DataArray:
+        """Groups are concatenated one after another; put samples back in input order so positional
+        consumers (label arrays, ensembles) stay aligned with the input."""
+        dim = self._get_group_dim(container)
+        tag = latest_tag(container.data)
+        restored = restore_positions(reassembled, dim, tag) if tag is not None else None
+        if restored is not None:
+            return restored
+        return reassembled.sel({dim: container.data[dim].values})
 
 
 # Single source strategy
@@ -214,6 +233,7 @@ class SingleTargetStrategy(AdaptiveStrategy):
         # Handle sampling logic
         min_count = None
         if isinstance(aligner, SamplingMixin) and hasattr(aligner, "sampling_method"):
+            aligner._check_class_sets(container, self.group_coord, aligner.target_coord)
             if aligner.sampling_method == "min_count":
                 min_count = aligner._calculate_min_count(container, self.group_coord, aligner.target_coord)
             kwargs["min_count"] = min_count
@@ -256,6 +276,7 @@ class SingleTargetStrategy(AdaptiveStrategy):
         Returns:
             The transformed DataContainer.
         """
+        container = self._tag_positions(container)
         current_groups = self._discover_groups(container)
 
         def transform_group(group_val):
@@ -285,11 +306,7 @@ class SingleTargetStrategy(AdaptiveStrategy):
 
         # Reassemble outputs #TODO: do we need to reassemble in the same order?
         reassembled = xr.concat(group_outputs, dim=self.group_dim)
-
-        # Note: Reordering to match original is complex and may not be necessary.
-        # If order is critical, it should be handled carefully.
-
-        return DataContainer(reassembled)
+        return DataContainer(self._restore_input_order(reassembled, container))
 
 
 # Joint group strategy
@@ -344,6 +361,7 @@ class JointGroupStrategy(AdaptiveStrategy):
         # Handle sampling logic
         min_count = None
         if isinstance(aligner, SamplingMixin) and hasattr(aligner, "sampling_method"):
+            aligner._check_class_sets(container, self.group_coord, aligner.target_coord)
             if aligner.sampling_method == "min_count":
                 min_count = aligner._calculate_min_count(container, self.group_coord, aligner.target_coord)
             kwargs["min_count"] = min_count
@@ -364,6 +382,7 @@ class JointGroupStrategy(AdaptiveStrategy):
         Returns:
             The transformed DataContainer.
         """
+        container = self._tag_positions(container)
         current_groups = self._discover_groups(container)
 
         def transform_group(group_val):
@@ -388,8 +407,7 @@ class JointGroupStrategy(AdaptiveStrategy):
 
         # Reassemble outputs
         reassembled = xr.concat(group_outputs, dim=self.group_dim)
-
-        return DataContainer(reassembled)
+        return DataContainer(self._restore_input_order(reassembled, container))
 
 
 ########################################################################################
@@ -429,55 +447,56 @@ class AdaptiveTransform(Transform, ABC):
             sample_dim: The dimension to use for the sample.
             **kwargs: Additional arguments passed to Transform base class or strategy's constructor.
         """
+        if strategy_name not in type(self)._STRATEGY_MAP:
+            raise ValueError(
+                f"Unknown or unsupported strategy: '{strategy_name}' for {type(self).__name__}. "
+                f"Available strategies: {list(type(self)._STRATEGY_MAP.keys())}"
+            )
+        self.strategy_name = strategy_name
+        # The strategy's arguments are this transform's hyperparameters: plain attributes that
+        # `clone()` and `set_params` treat like any other, and that `_fit` builds the strategy from.
+        for name, param in self._strategy_parameters().items():
+            if name in kwargs:
+                setattr(self, name, kwargs.pop(name))
+            elif param.default is Parameter.empty:
+                raise ValueError(f"Required argument '{name}' for strategy {self._strategy_cls().__name__} is missing.")
+            else:
+                setattr(self, name, param.default)
+        unexpected = set(kwargs) - _init_param_names(Transform)
+        if unexpected:
+            raise TypeError(f"{type(self).__name__} got unexpected keyword argument(s): {sorted(unexpected)}")
         super().__init__(**kwargs)
 
         self.sample_dim = sample_dim
-
-        self.strategy_name = strategy_name  # save for cloning
-        self.strategy, self._strategy_kwargs = self.get_strategy_and_kwargs(strategy_name, kwargs)
-
+        self._check_strategy_args()
+        self.strategy: AdaptiveStrategy | None = None  # built by `_fit` from the current attributes
         self._is_fitted = False
 
-    def get_strategy_and_kwargs(self, strategy_name: str, kwargs: dict) -> tuple[AdaptiveStrategy, dict]:
-        """
-        Create a strategy instance.
-        """
-        # make sure strategy_name is in the strategy map
-        if strategy_name not in self.__class__._STRATEGY_MAP:
-            raise ValueError(
-                f"Unknown or unsupported strategy: '{self.strategy_name}' for {self.__class__.__name__}. "
-                f"Available strategies: {list(self.__class__._STRATEGY_MAP.keys())}"
-            )
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        # Aligners pickled with xdflow < 0.3 kept strategy arguments in `_strategy_kwargs`; restore them as the
+        # attributes clone() and fit now read.
+        legacy = state.pop("_strategy_kwargs", None)
+        state.pop("_strategy_class", None)
+        self.__dict__.update(state)
+        if legacy is not None:
+            for name, param in self._strategy_parameters().items():
+                if name not in self.__dict__:
+                    self.__dict__[name] = legacy.get(name, param.default)
 
-        strategy_class = self.__class__._STRATEGY_MAP[strategy_name]
+    def _strategy_cls(self) -> type[AdaptiveStrategy]:
+        return type(self)._STRATEGY_MAP[self.strategy_name]
 
-        # make sure required strategyargs are in kwargs
-        sig = signature(strategy_class.__init__)
-        required_strategy_args = [
-            name
-            for name, p in sig.parameters.items()
-            if p.default is _empty
-            and p.kind in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
-            and name != "self"  # skip 'self' in methods
-        ]
+    def _strategy_parameters(self) -> dict[str, Parameter]:
+        return {
+            name: p
+            for name, p in signature(self._strategy_cls().__init__).parameters.items()
+            if name != "self" and p.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+        }
 
-        for arg in required_strategy_args:
-            if arg not in kwargs:
-                raise ValueError(f"Required argument '{arg}' for strategy {strategy_class.__name__} is missing.")
-            if kwargs[arg] is None:
-                raise ValueError(f"Required argument '{arg}' for strategy {strategy_class.__name__} is None.")
-
-        # all strategy constructor args
-        all_strategy_args = [
-            name
-            for name, p in sig.parameters.items()
-            if name != "self"
-            and p.kind in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
-        ]
-
-        strategy_kwargs = {k: v for k, v in kwargs.items() if k in all_strategy_args}
-
-        return strategy_class(**strategy_kwargs), strategy_kwargs
+    def _check_strategy_args(self) -> None:
+        for name, param in self._strategy_parameters().items():
+            if param.default is Parameter.empty and getattr(self, name) is None:
+                raise ValueError(f"Required argument '{name}' for strategy {self._strategy_cls().__name__} is None.")
 
     def _fit(self, data_container: DataContainer, **kwargs) -> "AdaptiveTransform":
         """
@@ -490,6 +509,8 @@ class AdaptiveTransform(Transform, ABC):
         Returns:
             Self (fitted transform).
         """
+        self._check_strategy_args()
+        self.strategy = self._strategy_cls()(**{name: getattr(self, name) for name in self._strategy_parameters()})
         self.strategy.adapt(self, data_container, **kwargs)
         self._is_fitted = True
         return self
@@ -521,10 +542,6 @@ class AdaptiveTransform(Transform, ABC):
         """
         return input_dims
 
-    def _get_clone_kwargs(self) -> dict:
-        """Include strategy parameters in clone kwargs."""
-        return {**super()._get_clone_kwargs(), **self._strategy_kwargs}
-
     def _prepare_data(self, data: xr.DataArray) -> xr.DataArray:
         """
         Prepare the data to be in the right format for the transform.
@@ -549,11 +566,6 @@ class SingleTargetAligner(AdaptiveTransform, ABC):
     to implement the methods required by the SingleTargetStrategy, ensuring a
     safe and explicit connection between the two components.
     """
-
-    def __init__(self, strategy_name: str, **kwargs):
-        super().__init__(strategy_name, **kwargs)
-
-        self._strategy_class: SingleTargetStrategy = self.__class__._STRATEGY_MAP[strategy_name]
 
     @abstractmethod
     def _fit_target(self, data_container: DataContainer, /, **kwargs) -> dict[str, Any]:
@@ -618,7 +630,6 @@ class JointGroupAligner(AdaptiveTransform, ABC):
         """
         super().__init__(strategy_name, **kwargs)
 
-        self._strategy_class: JointGroupStrategy = self.__class__._STRATEGY_MAP[strategy_name]
         self.output_dim_name = output_dim_name
 
     @abstractmethod
@@ -692,6 +703,19 @@ class SamplingMixin:
     """
 
     @staticmethod
+    def _check_class_sets(container: DataContainer, group_coord: str, target_coord: str) -> None:
+        """Sampled class rows are matched across groups by position, so every group needs the same classes."""
+        target_values = container.data.coords[target_coord].values
+        group_values = container.data.coords[group_coord].values
+        class_sets = {
+            group: sorted(np.unique(target_values[group_values == group]).tolist()) for group in np.unique(group_values)
+        }
+        if len({tuple(classes) for classes in class_sets.values()}) > 1:
+            raise ValueError(
+                f"All groups must contain the same '{target_coord}' classes to be aligned; got {class_sets}."
+            )
+
+    @staticmethod
     def _calculate_min_count(container: DataContainer, group_coord: str, target_coord: str) -> int:
         """Calculates the minimum number of samples per class across all data."""
         if target_coord not in container.data.coords:
@@ -754,9 +778,8 @@ class DummyAligner(AdaptiveTransform):
 
     _STRATEGY_MAP = {"dummy": _DummyStrategy}
 
-    def __init__(self, **kwargs):
-        # Manually create the strategy instance for the super call
-        super().__init__(strategy_name="dummy", sample_dim=None)
+    def __init__(self, sample_dim: str | None = None, sel: dict | None = None, drop_sel: dict | None = None):
+        super().__init__(strategy_name="dummy", sample_dim=sample_dim, sel=sel, drop_sel=drop_sel)
 
 
 class ProcrustesAligner(SingleTargetAligner, SamplingMixin):

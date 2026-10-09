@@ -1,15 +1,16 @@
+import importlib.util
+
 import numpy as np
 import pytest
 import xarray as xr
 
 from xdflow.core import DataContainer
+from xdflow.transforms.spectral import MultiTaperTransform
 
-try:
-    from xdflow.transforms.spectral import MultiTaperTransform
-except ImportError as exc:
-    if exc.name != "spectral_connectivity":
-        raise
-    pytestmark = pytest.mark.skip(reason="spectral-connectivity is not installed")
+# Only MultiTaperTransform needs the optional `spectral` extra; the module itself imports without it.
+requires_spectral = pytest.mark.skipif(
+    importlib.util.find_spec("spectral_connectivity") is None, reason="spectral-connectivity is not installed"
+)
 
 
 FREQ_RANGES = {
@@ -18,6 +19,7 @@ FREQ_RANGES = {
 }
 
 
+@requires_spectral
 def test_multitaper_avg_within_freq_bands_expected_dims():
     transform = MultiTaperTransform(
         fs=500,
@@ -30,6 +32,7 @@ def test_multitaper_avg_within_freq_bands_expected_dims():
     assert transform.get_expected_output_dims(("trial", "channel", "time")) == ("trial", "channel", "freq_band")
 
 
+@requires_spectral
 def test_multitaper_clone_preserves_avg_within_freq_bands():
     transform = MultiTaperTransform(
         fs=500,
@@ -44,6 +47,7 @@ def test_multitaper_clone_preserves_avg_within_freq_bands():
     assert cloned.freq_ranges == FREQ_RANGES
 
 
+@requires_spectral
 def test_multitaper_preserves_existing_history():
     rng = np.random.default_rng(0)
     data = xr.DataArray(
@@ -77,3 +81,31 @@ def test_multitaper_preserves_existing_history():
         "MultiTaperTransform",
     ]
     assert [entry["class"] for entry in container.data.attrs["data_history"]] == ["PreviousTransform"]
+
+
+def test_bandpass_filter_needs_no_spectral_extra_and_explicit_fs(monkeypatch):
+    import importlib
+    import sys
+
+    import numpy as np
+    import pytest
+    import xarray as xr
+
+    from xdflow.core.data_container import DataContainer
+
+    monkeypatch.setitem(sys.modules, "spectral_connectivity", None)  # as if the extra were not installed
+    monkeypatch.delitem(sys.modules, "xdflow.transforms.spectral", raising=False)
+    spectral = importlib.import_module("xdflow.transforms.spectral")
+
+    with pytest.raises(TypeError):
+        spectral.BandpassFilterTransform(8.0, 30.0)  # fs is required: a default would silently mis-filter
+    data = xr.DataArray(
+        np.random.default_rng(0).normal(size=(2, 1, 400)),
+        dims=("trial", "channel", "time"),
+        coords={"trial": [0, 1], "channel": [0], "time": np.arange(400) / 160},
+    )
+    filtered = spectral.BandpassFilterTransform(8.0, 30.0, fs=160).transform(DataContainer(data))
+    assert filtered.data.shape == data.shape
+
+    with pytest.raises(ModuleNotFoundError, match="spectral"):
+        spectral.MultiTaperTransform(fs=160)
