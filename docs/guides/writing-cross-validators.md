@@ -18,15 +18,14 @@ caching, and final pipeline fitting.
 A custom validator usually implements only two methods:
 
 ```python
-def _split_holdout(self, container: DataContainer) -> tuple[np.ndarray, np.ndarray]:
-    ...
+def _split_holdout(self, container: DataContainer) -> tuple[np.ndarray, np.ndarray]: ...
+
 
 def _get_splits(
     self,
     container: DataContainer,
     indices_to_split: np.ndarray,
-) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-    ...
+) -> Iterator[tuple[np.ndarray, np.ndarray]]: ...
 ```
 
 Both methods should return `trial` coordinate labels, not positional indices.

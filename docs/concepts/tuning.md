@@ -29,7 +29,7 @@ MLflow tracking is separate:
 pip install "xdflow[mlflow]"
 ```
 
-Use `use_mlflow=False` when you want tuning without experiment tracking.
+Tracking is off by default; pass `use_mlflow=True` to log trials to MLflow.
 
 ## Search space structure
 

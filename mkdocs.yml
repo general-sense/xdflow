@@ -1,8 +1,8 @@
 site_name: XDFlow
 site_description: Metadata-driven ML pipelines for structured data
 site_url: !ENV [READTHEDOCS_CANONICAL_URL, "https://xdflow.readthedocs.io/"]
-repo_url: https://github.com/canaery/xdflow
-repo_name: canaery/xdflow
+repo_url: https://github.com/general-sense/xdflow
+repo_name: general-sense/xdflow
 edit_uri: edit/main/docs/
 
 theme:
@@ -66,6 +66,8 @@ nav:
       - Hyperparameter Tuning: tutorials/tuning.md
       - Spectral Pipeline Walkthrough: tutorials/basic-pipeline.md
       - Reusable ML Patterns: tutorials/reusable-ml-patterns.md
+      - "EEG Motor Imagery: xdflow vs. sklearn": tutorials/eeg-motor-imagery.md
+      - "Activity Recognition: Splitting by Subject": tutorials/har-activity.md
   - Guides:
       - Writing Custom Transforms: guides/writing-transforms.md
       - Writing Custom Cross-Validators: guides/writing-cross-validators.md

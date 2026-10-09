@@ -8,7 +8,7 @@ Tuning is a first-class workflow in XDFlow. It is installed as an extra only bec
 pip install "xdflow[tuning]"
 ```
 
-Use `use_mlflow=False` for a lightweight local run without experiment tracking.
+MLflow tracking is off by default; pass `use_mlflow=True` (and install `xdflow[mlflow]`) to log trials.
 
 ## 1. Build A Tunable Pipeline
 

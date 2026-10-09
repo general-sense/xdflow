@@ -1,5 +1,7 @@
 # 5-Minute Core Quickstart
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-sense/xdflow/blob/main/examples/notebooks/quickstart.ipynb) Run this tutorial as a notebook in your browser.
+
 This quickstart uses only the base `xdflow` install. It creates a small labeled `xarray.DataArray`, wraps it in a `DataContainer`, builds a pipeline, and lets `KFoldValidator` run the evaluation loop.
 
 The example shows the mechanics that matter in larger experiments: labels live as coordinates, the classifier reads its target from a coordinate, the validator stratifies by that coordinate, stateful steps refit per fold, and predictions stay aligned with the trial axis.
