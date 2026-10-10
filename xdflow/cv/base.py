@@ -78,6 +78,61 @@ def _cleanup_torch_memory() -> None:
         pass
 
 
+def iter_predictors(transform: Transform | None) -> Iterator[Predictor]:
+    """Yield all Predictor instances within a transform recursively."""
+    from xdflow.composite import CompositeTransform
+    from xdflow.transforms import Transform as TransformType
+
+    if transform is None:
+        return
+
+    if isinstance(transform, Predictor):
+        yield transform
+        return
+
+    if isinstance(transform, CompositeTransform):
+        children = list(transform.children)
+        # GroupApplyTransform's children exist only after fit; its template is what the groups are cloned from
+        template = getattr(transform, "transform_template", None)
+        if isinstance(template, TransformType) and not any(child is template for child in children):
+            children.append(template)
+        for child in children:
+            if isinstance(child, TransformType):
+                yield from iter_predictors(child)
+
+
+def fit_label_encoders(pipeline: Transform, container: DataContainer) -> None:
+    """Fit provided encoders in-place for all predictors on the full dataset.
+
+    This learns the label vocabulary globally (including holdout if present)
+    without leaking feature-target relationships across folds.
+    """
+    for predictor in iter_predictors(pipeline):
+        if not getattr(predictor, "is_classifier", False):
+            continue
+        if getattr(predictor, "is_multilabel", False):
+            continue
+        target_coord = predictor.target_coord  # required arg for predictors
+        encoder = predictor.encoder  # required for classifiers, should error otherwise
+
+        if target_coord not in container.data.coords:
+            raise ValueError(
+                f"The target_coord '{target_coord}' specified in a predictor was not found in the data container's coordinates."
+            )
+        labels = container.data.coords[target_coord].values
+        unique_labels = np.unique(labels)
+        if hasattr(encoder, "classes_"):
+            existing = getattr(encoder, "classes_", None)
+            try:
+                if existing is not None and np.array_equal(existing, unique_labels):
+                    continue  # already fitted with correct classes
+            except Exception:
+                pass
+        if not hasattr(encoder, "fit"):
+            raise TypeError(f"Encoder for target '{target_coord}' must have a fit method")
+        encoder.fit(labels)
+
+
 class CrossValidator(ABC):
     """Base class for evaluating a predictive pipeline with held-out data.
 
@@ -527,25 +582,7 @@ class CrossValidator(ABC):
     # ------------------------------
     def _iter_predictors(self, transform: Transform | None) -> Iterator[Predictor]:
         """Yield all Predictor instances within a transform recursively."""
-        from xdflow.composite import CompositeTransform
-        from xdflow.transforms import Transform as TransformType
-
-        if transform is None:
-            return
-
-        if isinstance(transform, Predictor):
-            yield transform
-            return
-
-        if isinstance(transform, CompositeTransform):
-            children = list(transform.children)
-            # GroupApplyTransform's children exist only after fit; its template is what the groups are cloned from
-            template = getattr(transform, "transform_template", None)
-            if isinstance(template, TransformType) and not any(child is template for child in children):
-                children.append(template)
-            for child in children:
-                if isinstance(child, TransformType):
-                    yield from self._iter_predictors(child)
+        yield from iter_predictors(transform)
 
     def _find_and_fit_encoders(self, pipeline: Pipeline, container: DataContainer):
         """Fit provided encoders in-place for all predictors on the full dataset.
@@ -553,30 +590,7 @@ class CrossValidator(ABC):
         This learns the label vocabulary globally (including holdout if present)
         without leaking feature-target relationships across folds.
         """
-        for predictor in self._iter_predictors(pipeline):
-            if not getattr(predictor, "is_classifier", False):
-                continue
-            if getattr(predictor, "is_multilabel", False):
-                continue
-            target_coord = predictor.target_coord  # required arg for predictors
-            encoder = predictor.encoder  # required for classifiers, should error otherwise
-
-            if target_coord not in container.data.coords:
-                raise ValueError(
-                    f"The target_coord '{target_coord}' specified in a predictor was not found in the data container's coordinates."
-                )
-            labels = container.data.coords[target_coord].values
-            unique_labels = np.unique(labels)
-            if hasattr(encoder, "classes_"):
-                existing = getattr(encoder, "classes_", None)
-                try:
-                    if existing is not None and np.array_equal(existing, unique_labels):
-                        continue  # already fitted with correct classes
-                except Exception:
-                    pass
-            if not hasattr(encoder, "fit"):
-                raise TypeError(f"Encoder for target '{target_coord}' must have a fit method")
-            encoder.fit(labels)
+        fit_label_encoders(pipeline, container)
 
     @property
     def pipeline(self) -> Pipeline:
