@@ -1,6 +1,6 @@
 [project]
 name = "xdflow"
-version = "0.2.0"
+version = "0.3.0"
 description = "Metadata-driven ML pipelines for labeled structured data"
 authors = [
     {name = "Julien Bloch", email = "julien@canaery.com"},
