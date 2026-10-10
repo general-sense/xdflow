@@ -15,6 +15,71 @@ preprocessing, fitting, cross-validation, tuning and prediction, and your scikit
 straight in. Building on structure instead of bare arrays makes validation **correct** and **fast**, and
 analysis code **hard to break**.
 
+## Getting started
+
+```bash
+pip install xdflow
+```
+
+Cross-validate the model you already have with one call. `groups` keeps each person's trials on one side of
+every split:
+
+```python
+import xdflow
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+
+model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000))  # any scikit-learn model
+result = xdflow.evaluate(model, X, y, groups=subject_ids)  # NumPy arrays, an xarray DataArray or MNE Epochs
+print(result)
+```
+
+```text
+accuracy 0.924 ± 0.029 (mean ± sd over 5 folds, 10299 trials)
+Split: 5-fold, grouped (30 groups), stratified by class
+Computed once: nothing. Refit in each fold: pipeline (standardscaler, logisticregression).
+
+By group:
+       accuracy  n_trials
+group
+1         0.988       347
+2         0.977       302
+...
+```
+
+(Activity recognition from smartphone sensors, 30 people; [walkthrough](docs/tutorials/har-activity.md).)
+`result.predictions` holds every out-of-fold prediction with its trial metadata, `result.by("session")` breaks
+the score down by any coordinate, and `result.fit_final()` refits on all the data for new predictions.
+
+Check a split you already use, without running a model:
+
+```python
+from sklearn.model_selection import StratifiedKFold
+
+xdflow.check_split(X, StratifiedKFold(5, shuffle=True), y=y, metadata=info)  # info: one row per sample
+```
+
+```text
+Split check over 5 folds: shared data found.
+  - The same 'subject' values appear in training and test sets in 5 of 5 folds: the score measures performance on new trials from a subject seen in training, not on a new subject.
+```
+
+Your own preprocessing is a plain function. xdflow computes it once for all folds, after checking that each
+trial's output depends on that trial alone:
+
+```python
+import numpy as np
+
+
+@xdflow.step
+def log_power(data, band=(8.0, 30.0)):  # data: an xarray DataArray with named dims
+    return np.log((data.sel(freq=slice(*band)) ** 2).mean("freq"))
+
+
+xdflow.evaluate([log_power(), model], data, groups="subject")  # band is tunable as "log_power__band"
+```
+
 ## Structure is the data
 
 In a NumPy/scikit-learn workflow, structure lives outside the data. `X` is an anonymous array whose axes you
@@ -137,30 +202,27 @@ model = cv.finalize_pipeline(data)  # refit on all data for inference: model.pre
 
 ## Using an existing scikit-learn pipeline
 
-Wrap the model you already use and get xdflow's validation, caching, per-subject results and tuning around it,
-without rewriting anything:
+Pass it to `evaluate` as is, or put xdflow steps in front of it. Steps that learn nothing from the data run
+once on all trials, and your pipeline is refit inside every training fold:
 
 ```python
 from mne.decoding import CSP
 from sklearn.pipeline import make_pipeline
 
-existing = make_pipeline(CSP(n_components=6, log=True), LinearDiscriminantAnalysis())  # unchanged
-model = SKLearnPredictor.from_estimator(existing, sample_dim="trial", target_coord="label")
+import xdflow
+from xdflow.transforms import BandpassFilterTransform, CropTimeTransform
 
-pipeline = Pipeline(
-    "mine",
-    [
-        ("bandpass", BandpassFilterTransform(8, 30, fs=160)),  # computed once, shared by every fold
-        ("model", model),  # your pipeline, refit inside every fold
-    ],
+existing = make_pipeline(CSP(n_components=6, log=True), LinearDiscriminantAnalysis())  # unchanged
+result = xdflow.evaluate(
+    [BandpassFilterTransform(8, 30, fs=160), CropTimeTransform(0.5, 4.0), existing],  # filter and crop: once
+    epochs,  # labels from the event names; metadata columns such as "subject" become coordinates
+    groups="subject",
 )
-cv.set_pipeline(pipeline)
-cv.cross_validate(data)
 ```
 
-Its parameters stay tunable by their usual names (`csp__n_components`), and multi-dimensional input such
-as `trial × channel × time` is passed straight through. Move steps out of it into xdflow one at a time, when
-you want them computed once instead of per fold.
+Multi-dimensional input such as `trial × channel × time` is passed straight through, and its parameters stay
+tunable by their usual names (`csp__n_components`). In the other direction, `xdflow.to_sklearn(pipeline, ...)`
+makes any xdflow pipeline a scikit-learn estimator for `cross_val_score`, `GridSearchCV` or MOABB.
 
 ## Try it
 
@@ -169,6 +231,8 @@ you want them computed once instead of per fold.
 | [Quickstart](docs/tutorials/quickstart.md) | The core API on synthetic data, in seconds | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-sense/xdflow/blob/main/examples/notebooks/quickstart.ipynb) |
 | [EEG motor imagery](docs/tutorials/eeg-motor-imagery.md) | Within- and cross-subject decoding; the CSP leakage shortcut | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-sense/xdflow/blob/main/examples/notebooks/eeg_motor_imagery.ipynb) |
 | [Human activity recognition](docs/tutorials/har-activity.md) | Wearable sensors, 30 subjects; subject leakage in random K-fold | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-sense/xdflow/blob/main/examples/notebooks/har_activity.ipynb) |
+| [Evaluate an existing model](examples/evaluate_existing_model.py) | `evaluate`, `check_split` and `to_sklearn` on EEG with an MNE + scikit-learn model | |
+| [MOABB benchmark](examples/moabb_evaluation.py) | An xdflow pipeline evaluated by MOABB next to the same model in scikit-learn | |
 
 ## Installation
 
@@ -246,14 +310,16 @@ print(f"Weighted F1: {cv.cross_validate(data):.3f}")
   `SKLearnPredictor`/`SKLearnTransformer`, or wrap an existing estimator or `Pipeline` as-is with
   `SKLearnPredictor.from_estimator`. Multi-target regression, multilabel classification, and sample
   weights are supported.
-- **Small, explicit contracts.** A custom transform is a class with `_fit`/`_transform` and declared
-  dimensions. It is easy to write, test, review, and generate with LLM coding tools
-  ([guide](docs/guides/llm.md)).
+- **Custom steps are functions.** `@xdflow.step` turns a function of an `xarray.DataArray` into a step that
+  caches, clones and tunes like a built-in one; steps that learn from training data take a `fit` function.
+  For full control, a transform is a small class with `_fit`/`_transform` and declared dimensions, easy to
+  write, test, review, and generate with LLM coding tools ([guide](docs/guides/writing-transforms.md)).
 
 ## Works with the tools you already use
 
-- **scikit-learn.** `xdflow` builds on it: scikit-learn estimators, metrics and splitters plug in, and an
-  existing `Pipeline` wraps as-is with `SKLearnPredictor.from_estimator`. On top of that, metadata lives in
+- **scikit-learn.** `xdflow` builds on it: scikit-learn estimators, metric names and splitters plug in, an
+  existing `Pipeline` runs as is in `evaluate`, and `to_sklearn` turns an xdflow pipeline into a scikit-learn
+  estimator. On top of that, metadata lives in
   the data, splits are named, and stateless features are computed once for all folds and tuning trials,
   where `Pipeline(memory=...)` recomputes them for every fold.
 - **MNE-Python.** `from_mne_epochs` brings `Epochs` in with their labels and metadata, and `CSPTransform`

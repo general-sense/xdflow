@@ -62,6 +62,7 @@ nav:
       - Tuning: concepts/tuning.md
   - Tutorials:
       - tutorials/index.md
+      - Evaluate an Existing Model: tutorials/evaluate.md
       - 5-Minute Core Quickstart: tutorials/quickstart.md
       - Hyperparameter Tuning: tutorials/tuning.md
       - Spectral Pipeline Walkthrough: tutorials/basic-pipeline.md

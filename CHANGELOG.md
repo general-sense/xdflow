@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- `xdflow.evaluate(model, X, y, groups=..., cv=...)`: cross-validation in one call for NumPy arrays, xarray
+  data or MNE `Epochs` with a scikit-learn estimator, an xdflow pipeline, or xdflow steps followed by an
+  estimator. Reports scores per fold and per group (`.by("subject")`), every out-of-fold prediction with its
+  trial metadata, which steps ran once and which were refit per fold, and a split audit; warns when shuffled
+  folds share subjects or sessions. Metric names follow scikit-learn.
+- `xdflow.check_split(X, cv, ...)`: audits any split (scikit-learn splitters, index pairs, or an xdflow
+  validator after `cross_validate`) for subjects, sessions, runs and source trials shared between training and
+  test sets, and for test samples with an exact copy in the training set.
+- `@xdflow.step`: a function of an `xr.DataArray` becomes a pipeline step whose parameters clone, cache and
+  tune like a built-in transform's. Inputs are read-only, each call checks that trials are processed
+  independently, and `@step(fit=...)` adds state learned on training folds.
+- `xdflow.make_pipeline(*steps)` names steps automatically, as in scikit-learn.
+- `xdflow.to_sklearn(pipeline, dims, coords)`: an xdflow pipeline as a scikit-learn classifier or regressor,
+  for `cross_val_score`, `GridSearchCV` and MOABB.
+- `xdflow.from_numpy(X, dims, metadata=..., **trial_coords)` wraps sample-first arrays.
+- Every built-in transform imports from `xdflow.transforms` (`from xdflow.transforms import CropTimeTransform`);
+  optional dependencies load only when their transform is used.
+- `SplitterValidator` runs xdflow cross-validation over any scikit-learn splitter or explicit index pairs;
+  `CrossValidator.split_trials_` records each fold's training and validation trials.
+- Examples: `examples/evaluate_existing_model.py` and `examples/moabb_evaluation.py`.
+
+### Fixed
+
+- Fitted classifiers predict on data without a label coordinate (new, unlabeled recordings).
+- Cross-validation no longer fails when a fold pipeline cannot be pickled for the fit cache (for example a
+  lambda after the first stateful step); that fold runs uncached, with a warning.
+
 ## [0.3.0] - 2026-10-10
 
 - Prepared initial open-source release.

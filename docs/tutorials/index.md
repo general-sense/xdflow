@@ -2,6 +2,7 @@
 
 The tutorials show how XDFlow uses metadata as pipeline context: coordinate targets, named-dimension transforms, leakage-safe validation, fold-invariant reuse, modular pipelines, and specialized split policies.
 
+- [Evaluate an Existing Model](evaluate.md): one call from your data and scikit-learn model to per-fold, per-subject and per-trial results; auditing a split you already use; xdflow pipelines inside scikit-learn and MOABB
 - [5-Minute Core Quickstart](quickstart.md): runnable base-install pipeline with coordinate targets, stratified CV, stateful refits, and prediction alignment
 - [Hyperparameter Tuning](tuning.md): Optuna-backed search over pipeline parameters, optional steps, switch choices, and multiple pipelines
 - [Spectral Pipeline Walkthrough](basic-pipeline.md): signal-processing pipeline where expensive fold-invariant feature extraction can be reused across folds

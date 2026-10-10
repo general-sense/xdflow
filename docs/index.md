@@ -54,10 +54,11 @@ XDFlow currently operates on in-memory `xarray.DataArray` inputs. Out-of-core an
 ## Start here
 
 1. Read [Installation](installation.md) to set up the package and optional extras.
-2. Read [Concepts](concepts/index.md) for the runtime model and transform rules.
-3. Run the [5-Minute Core Quickstart](tutorials/quickstart.md) for a base-install example.
-4. Read [Execution Model](concepts/execution.md) for the split, refit, and caching rules.
-5. Use [Hyperparameter Tuning](tutorials/tuning.md) to search over pipeline parameters and architecture choices.
+2. Try [Evaluate an Existing Model](tutorials/evaluate.md): one call with your data and scikit-learn model.
+3. Read [Concepts](concepts/index.md) for the runtime model and transform rules.
+4. Run the [5-Minute Core Quickstart](tutorials/quickstart.md) for a base-install example.
+5. Read [Execution Model](concepts/execution.md) for the split, refit, and caching rules.
+6. Use [Hyperparameter Tuning](tutorials/tuning.md) to search over pipeline parameters and architecture choices.
 6. Follow the [Spectral Pipeline Walkthrough](tutorials/basic-pipeline.md) for an end-to-end signal-processing example.
 7. Read [Reusable ML Patterns](tutorials/reusable-ml-patterns.md) for multilabel, weighting, and domain-transfer examples.
 8. Use [Writing Custom Transforms](guides/writing-transforms.md) when adding reusable preprocessing or feature extraction.
