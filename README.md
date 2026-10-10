@@ -228,6 +228,7 @@ makes any xdflow pipeline a scikit-learn estimator for `cross_val_score`, `GridS
 
 | Example | What it shows | |
 |---|---|---|
+| [Evaluate your model](docs/tutorials/evaluate.md) | `evaluate`, `check_split`, `@step` and `to_sklearn` on 30 people's phone-sensor data | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-sense/xdflow/blob/main/examples/notebooks/evaluate.ipynb) |
 | [Quickstart](docs/tutorials/quickstart.md) | The core API on synthetic data, in seconds | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-sense/xdflow/blob/main/examples/notebooks/quickstart.ipynb) |
 | [EEG motor imagery](docs/tutorials/eeg-motor-imagery.md) | Within- and cross-subject decoding; the CSP leakage shortcut | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-sense/xdflow/blob/main/examples/notebooks/eeg_motor_imagery.ipynb) |
 | [Human activity recognition](docs/tutorials/har-activity.md) | Wearable sensors, 30 subjects; subject leakage in random K-fold | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-sense/xdflow/blob/main/examples/notebooks/har_activity.ipynb) |

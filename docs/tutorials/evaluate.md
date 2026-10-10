@@ -5,8 +5,10 @@ trial. It takes the data and model you already have: NumPy arrays, an `xarray.Da
 scikit-learn estimator or `Pipeline`. This page also covers `check_split`, which audits a split without running
 a model, and `to_sklearn`, which goes the other way and turns an xdflow pipeline into a scikit-learn estimator.
 
-The runnable version, on public EEG data with an MNE + scikit-learn model, is
-[`examples/evaluate_existing_model.py`](https://github.com/general-sense/xdflow/blob/main/examples/evaluate_existing_model.py).
+Run it in the browser with the [Colab notebook](https://colab.research.google.com/github/general-sense/xdflow/blob/main/examples/notebooks/evaluate.ipynb)
+(activity recognition, 30 people), or see
+[`examples/evaluate_existing_model.py`](https://github.com/general-sense/xdflow/blob/main/examples/evaluate_existing_model.py)
+for the same calls on public EEG data with an MNE + scikit-learn model.
 
 ## One call
 
@@ -59,14 +61,11 @@ With the same split, `evaluate` gives the same fold scores as scikit-learn's `cr
 
 ## Reading the result
 
-```python
-result.score                 # mean over folds
-result.fold_scores           # one per fold
-result.by("subject")         # score and trial count per subject (or session, condition...)
-result.predictions           # one row per trial: its coordinates, y_true, y_pred and fold
-result.split                 # what the folds share between training and test sets
-model = result.fit_final()   # refit on all trials; model.predict(new_data) needs no labels
-```
+- `result.score` and `result.fold_scores`: the mean over folds, and each fold's score.
+- `result.by("subject")`: score and trial count per subject, or per session, condition or any trial coordinate.
+- `result.predictions`: one row per trial with its coordinates, `y_true`, `y_pred` and `fold`.
+- `result.split`: what the folds share between training and test sets.
+- `result.fit_final()`: the pipeline refit on all trials; its `predict` needs no labels.
 
 ## xdflow steps in front of your model
 
