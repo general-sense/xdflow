@@ -202,6 +202,7 @@ class CrossValidator(ABC):
         self.oof_probabilities_ = []  # Out-of-fold probabilities/scores
         self.true_labels_ = []
         self.oof_containers_: list[DataContainer] = []  # Per-fold scored predictions with their trial coords
+        self.split_trials_: list[tuple[np.ndarray, np.ndarray]] = []  # (train, validation) trial labels per fold
         # Class order at evaluation time; finalize_pipeline may later refit the template's encoder
         self.oof_class_labels_: list[Any] | None = None
         self.holdout_class_labels_: list[Any] | None = None
@@ -890,6 +891,7 @@ class CrossValidator(ABC):
         self.oof_probabilities_ = []
         self.true_labels_ = []
         self.oof_containers_ = []
+        self.split_trials_ = []
         self.oof_class_labels_ = self._snapshot_class_labels()
 
         # Step 7: Run cross-validation loop with stateful pipeline
@@ -897,6 +899,7 @@ class CrossValidator(ABC):
             if self.verbose:
                 print("Running cross-validation with stateful pipeline...")
             for fold_idx, (train_indices, validation_indices) in enumerate(splits):
+                self.split_trials_.append((np.asarray(train_indices), np.asarray(validation_indices)))
                 self._process_cv_fold(
                     fold_idx,
                     train_indices,
