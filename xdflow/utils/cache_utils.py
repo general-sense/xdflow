@@ -14,6 +14,7 @@ import pickle
 import shutil
 import threading
 import time
+import warnings
 from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
@@ -128,6 +129,10 @@ def save_cached_object(prefix: str, key_dict: dict[str, Any], obj: Any) -> None:
     except PermissionError:
         # Skip caching if filesystem forbids writing (e.g., immutable files/attrs)
         return
+    except (pickle.PicklingError, AttributeError, TypeError) as exc:
+        # Not picklable (a lambda or a function defined inside another function): run without the cache.
+        cache_path.unlink(missing_ok=True)
+        warnings.warn(f"Not caching a '{prefix}' result: it cannot be pickled ({exc}).", UserWarning, stacklevel=2)
 
 
 def get_pipeline_cache_key_dict(func: Callable, instance: Any, *args, **kwargs) -> dict[str, Any]:

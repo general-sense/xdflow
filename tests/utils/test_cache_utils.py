@@ -156,3 +156,36 @@ def test_cache_key_sees_attrs_but_not_data_history():
     key = hash_dict({"x": DataContainer(da)})
     assert hash_dict({"x": DataContainer(other_rate)}) != key
     assert hash_dict({"x": DataContainer(with_history)}) == key
+
+
+def test_unpicklable_fold_pipeline_runs_without_the_fit_cache():
+    """A lambda after the first stateful step cannot be pickled; CV must still run, just uncached."""
+    import pytest
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+
+    from xdflow import KFoldValidator, Pipeline
+    from xdflow.transforms.basic_transforms import FunctionTransform
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor, SKLearnTransformer
+
+    rng = np.random.default_rng(0)
+    data = DataContainer(
+        xr.DataArray(
+            rng.normal(size=(30, 4)),
+            dims=("trial", "feature"),
+            coords={"trial": np.arange(30), "label": ("trial", np.arange(30) % 2)},
+        )
+    )
+    pipeline = Pipeline(
+        "p",
+        [
+            ("scale", SKLearnTransformer(StandardScaler, sample_dim="trial")),
+            ("double", FunctionTransform(lambda x: x * 2)),
+            ("lr", SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label")),
+        ],
+    )
+    validator = KFoldValidator(n_splits=3, verbose=False, use_stateful_fit_cache=True)
+    validator.set_pipeline(pipeline)
+    with pytest.warns(UserWarning, match="cannot be pickled"):
+        validator.cross_validate(data)
+    assert len(validator.cv_scores_) == 3
