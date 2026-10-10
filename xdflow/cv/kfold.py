@@ -377,9 +377,12 @@ class GroupedKFoldValidator(CrossValidator):
         else:
             stratify_labels = labels
 
-        # Perform stratified split
-        train_val_indices, holdout_indices = train_test_split(
-            all_trials, test_size=self.test_size, stratify=stratify_labels, random_state=self.random_state
+        # Split positions (not trial labels) so group lookups below index all_groups correctly
+        train_val_pos, holdout_pos = train_test_split(
+            np.arange(len(all_trials)),
+            test_size=self.test_size,
+            stratify=stratify_labels,
+            random_state=self.random_state,
         )
 
         if (
@@ -387,13 +390,13 @@ class GroupedKFoldValidator(CrossValidator):
         ):  # if both are specified, otherwise keep all and split later
             # keep only indices that are in either train or val groups
             train_val_groups = set(self.train_groups + self.val_groups)
-            train_val_indices = train_val_indices[np.isin(all_groups[train_val_indices], list(train_val_groups))]
+            train_val_pos = train_val_pos[np.isin(all_groups[train_val_pos], list(train_val_groups))]
 
         if self.test_groups is not None:
             # keep only indices that are in test_groups
-            holdout_indices = holdout_indices[np.isin(all_groups[holdout_indices], np.asarray(self.test_groups))]
+            holdout_pos = holdout_pos[np.isin(all_groups[holdout_pos], np.asarray(self.test_groups))]
 
-        return train_val_indices, holdout_indices
+        return all_trials[train_val_pos], all_trials[holdout_pos]
 
     def _get_splits(
         self, container: DataContainer, indices_to_split: np.ndarray

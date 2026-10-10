@@ -276,7 +276,7 @@ class Pipeline(CompositeTransform):
             raise TypeError("The last step of the pipeline must be a Predictor for prediction.")
 
         transformed_container = self._transform_to_final_step(container, **kwargs)
-        return final_step.transform.predict(transformed_container)
+        return final_step.transform.predict(transformed_container, **kwargs)
 
     def predict_proba(self, container: DataContainer, **kwargs) -> DataContainer:
         """
@@ -297,7 +297,7 @@ class Pipeline(CompositeTransform):
             raise TypeError("The last step of the pipeline must be a Predictor for prediction.")
 
         transformed_container = self._transform_to_final_step(container, **kwargs)
-        return final_step.transform.predict_proba(transformed_container)
+        return final_step.transform.predict_proba(transformed_container, **kwargs)
 
     def prepare_for_inference(self, *, set_n_jobs_single: bool = True) -> None:
         """

@@ -316,3 +316,60 @@ class TestLGBMPredictorVerboseEval:
 
         predictor.fit(classification_data)
         assert hasattr(predictor, "best_iteration_")
+
+
+def test_early_stopping_with_multiple_regression_targets():
+    from lightgbm import LGBMRegressor
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(200, 4))
+    data = DataContainer(
+        xr.DataArray(
+            X,
+            dims=("trial", "feature"),
+            coords={
+                "trial": np.arange(200),
+                "feature": np.arange(4),
+                "a": ("trial", 2 * X[:, 0]),
+                "b": ("trial", X[:, 1] - X[:, 2]),
+            },
+        )
+    )
+    predictor = LGBMPredictor(
+        LGBMRegressor,
+        sample_dim="trial",
+        target_coord=["a", "b"],
+        is_classifier=False,
+        early_stopping_rounds=5,
+        validation_seed=0,
+        verbose=-1,
+    )
+    predictor.fit(data)
+
+    assert predictor.predict(data).data.shape == (200, 2)
+    assert len(predictor.best_iteration_) == 2
+
+
+def test_early_stopping_with_a_target_pattern():
+    from lightgbm import LGBMRegressor
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(60, 3))
+    data = DataContainer(
+        xr.DataArray(
+            X,
+            dims=("trial", "feature"),
+            coords={
+                "trial": np.arange(60),
+                "feature": np.arange(3),
+                "out_a": ("trial", X[:, 0]),
+                "out_b": ("trial", X[:, 1] ** 2),
+            },
+        )
+    )
+    predictor = LGBMPredictor(
+        LGBMRegressor, sample_dim="trial", target_coord="out_*", early_stopping_rounds=3, validation_seed=0, verbose=-1
+    )
+    predictor.fit(data)
+
+    assert predictor.predict(data).data.shape == (60, 2)

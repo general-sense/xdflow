@@ -15,9 +15,17 @@ spectral_logger.setLevel(logging.CRITICAL + 1)
 spectral_logger.addHandler(logging.NullHandler())
 spectral_logger.propagate = False
 
-# Import spectral_connectivity after logger suppression
-from spectral_connectivity import Connectivity, Multitaper  # noqa
-from spectral_connectivity.transforms import prepare_time_series  # type: ignore[import]  # noqa
+
+def _spectral_connectivity() -> tuple[Any, Any, Any]:
+    """Import spectral_connectivity on use: only MultiTaperTransform needs the 'spectral' extra."""
+    try:
+        from spectral_connectivity import Connectivity, Multitaper
+        from spectral_connectivity.transforms import prepare_time_series  # type: ignore[import]
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "MultiTaperTransform requires the 'spectral' extra: pip install 'xdflow[spectral]'"
+        ) from exc
+    return Connectivity, Multitaper, prepare_time_series
 
 
 class MultiTaperTransform(Transform):
@@ -75,6 +83,7 @@ class MultiTaperTransform(Transform):
             drop_sel: Optional labels to drop before transforming.
         """
         super().__init__(sel=sel, drop_sel=drop_sel)
+        _spectral_connectivity()  # fail at construction, not mid-pipeline, if the extra is missing
         if not 0 < window_step_frac <= 1:
             raise ValueError("`window_step_frac` must be in the range (0, 1].")
 
@@ -139,6 +148,7 @@ class MultiTaperTransform(Transform):
         Returns:
             The processed power data for one trial as a numpy array.
         """
+        Connectivity, Multitaper, prepare_time_series = _spectral_connectivity()
         # trial_lfp comes in as (channel, time); transpose to (time, channel)
         time_series_2d = trial_lfp.T
         # spectral_connectivity>=2 requires explicit 3D input with clarified axis.
@@ -359,7 +369,7 @@ class BandpassFilterTransform(Transform):  # TODO: rename or combine with Bandpa
         self,
         lowcut: float,
         highcut: float,
-        fs: int = 500,
+        fs: float,
         sel: dict[str, Any] | None = None,
         drop_sel: dict[str, Any] | None = None,
         transform_sel: dict[str, Any] | None = None,

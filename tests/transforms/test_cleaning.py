@@ -2,9 +2,10 @@
 
 import numpy as np
 import pytest
+import xarray as xr
 
 from xdflow.core.data_container import DataContainer
-from xdflow.transforms.cleaning import CARTransform, RemoveOutliersTransform
+from xdflow.transforms.cleaning import CARTransform, RegressOutReferenceTransform, RemoveOutliersTransform
 
 
 class TestCARTransform:
@@ -71,7 +72,6 @@ class TestRemoveOutliersTransform:
             "per_dim",
             "std_threshold",
             "use_fit",
-            "is_stateful",
             "sel",
             "drop_sel",
             "transform_sel",
@@ -79,3 +79,52 @@ class TestRemoveOutliersTransform:
         }
         assert cloned.per_dim == ["channel", "time"]
         assert cloned.std_threshold == 4.0
+
+
+def test_regress_out_reference_use_fit_learns_from_fit_data_only():
+    import warnings
+
+    import xarray as xr
+
+    rng = np.random.default_rng(0)
+
+    def make(gain):
+        ref = rng.normal(size=(10, 1, 50))
+        values = np.concatenate([ref, gain * ref + rng.normal(size=(10, 2, 50))], axis=1)
+        return DataContainer(
+            xr.DataArray(
+                values,
+                dims=("trial", "channel", "time"),
+                coords={"trial": np.arange(10), "channel": ["ref", "a", "b"], "time": np.arange(50)},
+            )
+        )
+
+    train, test = make(0.5), make(2.0)
+    fitted = RegressOutReferenceTransform("ref", use_fit=True)
+    assert fitted.is_stateful
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        fitted.fit(train)
+        from_train = fitted.transform(test).data
+
+    with pytest.warns(UserWarning, match="across trials"):
+        from_test = RegressOutReferenceTransform("ref").transform(test).data
+
+    # the train-fitted gain (0.5) leaves part of the test signal's 2.0 * ref behind
+    assert not np.allclose(from_train.sel(channel="a"), from_test.sel(channel="a"))
+
+
+def test_regress_out_reference_refuses_channels_it_was_not_fitted_on():
+    def signals(channels):
+        ref = np.arange(10.0).reshape(2, 5)
+        return DataContainer(
+            xr.DataArray(
+                np.stack([ref] * len(channels), axis=1),
+                dims=("trial", "channel", "time"),
+                coords={"channel": channels},
+            )
+        )
+
+    fitted = RegressOutReferenceTransform("ref", use_fit=True).fit(signals(["ref", "a"]))
+    with pytest.raises(ValueError, match="'b'"):
+        fitted.transform(signals(["ref", "a", "b"]))

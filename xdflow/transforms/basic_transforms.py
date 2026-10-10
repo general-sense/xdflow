@@ -244,10 +244,10 @@ class SampleWeightTransform(Transform):
                     value = value.item()
                 return weight_map.get(value, self.default_weight)
 
-            vectorized_lookup = np.vectorize(safe_lookup)
+            vectorized_lookup = np.vectorize(safe_lookup, otypes=[np.float64])
             weights = vectorized_lookup(coord_values)
         elif self.weight_func is not None:
-            vectorized_func = np.vectorize(self.weight_func)
+            vectorized_func = np.vectorize(self.weight_func, otypes=[np.float64])
             weights = vectorized_func(coord_values)
         else:
             weights = np.full_like(coord_values, fill_value=self.default_weight, dtype=np.float64)
@@ -283,7 +283,9 @@ class BalanceClassWeightTransform(Transform):
     supported because this transform changes coordinates.
     """
 
-    is_stateful: bool = False
+    # Stateful so cross-validation recomputes weights from each training fold; computed once over all
+    # data, the class counts of validation/holdout trials would shape the training weights.
+    is_stateful: bool = True
     input_dims: tuple[str, ...] = ()
     output_dims: tuple[str, ...] = ()
     _supports_transform_sel: bool = False
@@ -324,6 +326,10 @@ class BalanceClassWeightTransform(Transform):
         self.weight_normalize = weight_normalize
         self.target_coord = target_coord
         self.dtype = dtype
+
+    def _fit(self, container: DataContainer, **kwargs) -> BalanceClassWeightTransform:
+        # Nothing to learn: weights depend only on the data being transformed (the training fold inside CV).
+        return self
 
     @staticmethod
     def _safe_key(value: Any) -> Any:
@@ -534,7 +540,10 @@ class FlattenTransform(Transform):
         if not isinstance(dims, tuple) or len(dims) < 2:
             raise ValueError("`dims` must be a tuple of at least two strings.")
         self.dims = dims
-        self.new_dim_name = f"flat_{'__'.join(self.dims)}"
+
+    @property
+    def new_dim_name(self) -> str:
+        return f"flat_{'__'.join(self.dims)}"
 
     def _transform(self, container: DataContainer, **kwargs) -> DataContainer:
         """
@@ -667,7 +676,10 @@ class UnflattenTransform(Transform):
         if not dim.startswith("flat_"):
             raise ValueError("`dim` must have been flattened before, and must start with 'flat_'.")
         self.dim = dim
-        self.new_dim_names = dim.replace("flat_", "").split("__")
+
+    @property
+    def new_dim_names(self) -> list[str]:
+        return self.dim.removeprefix("flat_").split("__")
 
     def _transform(self, container: DataContainer, **kwargs) -> DataContainer:
         """
@@ -717,13 +729,14 @@ class UnflattenTransform(Transform):
 
                 # Check if the coordinate depends on 'trial' and at least one of the other new dims
                 if "trial" in coord_data.dims and any(d in coord_data.dims for d in other_dims):
-                    # To drop the other dims, we select the first element along them.
-                    # Since the values are broadcast, any index is fine.
+                    # Drop the other dims only if the values were merely broadcast along them;
+                    # coords that genuinely vary per (trial, other dim) are kept as they are.
                     selector = {dim: 0 for dim in other_dims if dim in coord_data.dims}
                     if selector:
-                        # Drop the other dimensions
                         new_coord_data = coord_data.isel(**selector, drop=True)
-                        coords_to_update[coord_name] = new_coord_data
+                        if bool((coord_data.variable == new_coord_data.variable).all()):
+                            # assign the bare variable: the DataArray carries sliced copies of other coords
+                            coords_to_update[coord_name] = new_coord_data.variable
 
             if coords_to_update:
                 unflattened_data = unflattened_data.assign_coords(coords_to_update)
@@ -744,7 +757,7 @@ class UnflattenTransform(Transform):
             A tuple of dimension names for the output data.
         """
         # Remove the original dimensions that are being unflattened
-        remaining_dims = [dim for dim in input_dims if dim not in self.dim]
+        remaining_dims = [dim for dim in input_dims if dim != self.dim]
         # Add the new unflattened dimensions to the end
         return tuple(remaining_dims) + tuple(self.new_dim_names)
 
@@ -826,8 +839,8 @@ class CropTimeTransform(Transform):
     DataArray's time coordinate values.
 
     Args:
-        time_window_start_ms: Start of the time window (inclusive).
-        time_window_end_ms: End of the time window (inclusive).
+        start: Start of the time window (inclusive), in the time coordinate's units.
+        end: End of the time window (inclusive), in the time coordinate's units.
         time_coord: Name of the time coordinate/dimension to slice over. Defaults to "time".
         sel: Optional selection to apply before transforming.
         drop_sel: Optional drop selection to apply before transforming.
@@ -839,15 +852,15 @@ class CropTimeTransform(Transform):
 
     def __init__(
         self,
-        time_window_start_ms: float,
-        time_window_end_ms: float,
+        start: float,
+        end: float,
         time_coord: str = "time",
         sel: dict[str, Any] | None = None,
         drop_sel: dict[str, Any] | None = None,
     ):
         super().__init__(sel=sel, drop_sel=drop_sel)
-        self.time_window_start_ms = time_window_start_ms
-        self.time_window_end_ms = time_window_end_ms
+        self.start = start
+        self.end = end
         self.time_coord = time_coord
 
     def _transform(self, container: DataContainer, **kwargs) -> DataContainer:
@@ -865,7 +878,14 @@ class CropTimeTransform(Transform):
             raise ValueError(f"Time coordinate '{self.time_coord}' not found in DataArray coords: {list(data.coords)}")
 
         # Inclusive label-based slice on the time coordinate
-        sliced = container.sel(**{self.time_coord: slice(self.time_window_start_ms, self.time_window_end_ms)})
+        sliced = container.sel(**{self.time_coord: slice(self.start, self.end)})
+        if sliced.data.sizes.get(self.time_coord, 1) == 0:
+            # Most often a unit mismatch, e.g. milliseconds given for a time coordinate in seconds
+            values = data.coords[self.time_coord].values
+            raise ValueError(
+                f"CropTimeTransform window [{self.start}, {self.end}] selects no samples; '{self.time_coord}' spans "
+                f"{values.min()} to {values.max()}. start/end must be in the time coordinate's units."
+            )
         return sliced
 
     def get_expected_output_dims(self, input_dims: tuple[str, ...]) -> tuple[str, ...]:

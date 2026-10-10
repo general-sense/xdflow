@@ -188,3 +188,81 @@ def test_suggest_and_set_params(tuner_instance, nested_pipeline, param_grid):
     assert inner_step1.param_a == 15
     assert inner_step2.random_state == 2
     assert main_step3.random_state == 150.5
+
+
+def test_enqueue_initial_trials_includes_selected_switch_params(mock_cv, mock_data_container):
+    """The baseline trial must use the configured params of the selected switch branch, not sample them."""
+    from xdflow.composite import SwitchTransform
+
+    switch = SwitchTransform(
+        choices=[
+            ("configured", MockSimpleTransform(param_a=10, param_b="x")),
+            ("passthrough", MockSimpleTransform()),
+        ],
+        choose="configured",
+    )
+    pipeline = MockPipeline(name="switch_init", steps=[("switch", switch)])
+    param_grid = {pipeline.name: {"switch": {"configured": {"param_a": (5, 15), "param_b": ["x", "y"]}}}}
+    tuner = Tuner(
+        pipelines_to_tune=[pipeline],
+        cv_strategy=mock_cv,
+        param_grid=param_grid,
+        initial_data_container=mock_data_container,
+        use_mlflow=False,
+    )
+    tuner.study = optuna.create_study()
+
+    tuner._enqueue_initial_trials()
+
+    assert tuner.study.get_trials()[0].system_attrs["fixed_params"] == {
+        "pipeline": "switch_init",
+        "switch_init__switch__choose": "configured",
+        "switch_init__switch__configured__param_a": 10,
+        "switch_init__switch__configured__param_b": "x",
+    }
+
+
+def test_implicit_optional_params_rebuild_the_evaluated_pipeline():
+    """Params given at an OptionalTransform's level tune its branch; the recorded choice must match."""
+    import numpy as np
+    import xarray as xr
+    from sklearn.decomposition import PCA
+    from sklearn.linear_model import LogisticRegression
+
+    from xdflow.composite import Pipeline
+    from xdflow.composite.switch_transform import OptionalTransform
+    from xdflow.core.data_container import DataContainer
+    from xdflow.cv import KFoldValidator
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor, SKLearnTransformer
+
+    rng = np.random.default_rng(0)
+    data = DataContainer(
+        xr.DataArray(
+            rng.normal(size=(60, 6)),
+            dims=("trial", "feature"),
+            coords={"trial": np.arange(60), "feature": np.arange(6), "y": ("trial", np.array(["a", "b"] * 30))},
+        )
+    )
+    optional = OptionalTransform(SKLearnTransformer(PCA, sample_dim="trial", n_components=2), name="pca")
+    clf = SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="y")
+    pipeline = Pipeline("pipe", [("opt", optional), ("clf", clf)])
+    tuner = Tuner(
+        pipelines_to_tune=pipeline,
+        cv_strategy=KFoldValidator(n_splits=3, use_stateful_fit_cache=False, verbose=False),
+        param_grid={"pipe": {"opt": {"n_components": [2, 4]}}},
+        initial_data_container=data,
+        use_mlflow=False,
+        use_cache=False,
+        verbose=0,
+    )
+    tuner.tune(n_trials=4)
+
+    assert {t.params["pipe__opt__choose"] for t in tuner.study.trials} == {"pca"}
+    # the baseline trial is enqueued with the configured value (not merely sampled to it)
+    assert tuner.study.trials[0].system_attrs["fixed_params"]["pipe__opt__pca__n_components"] == 2
+    best = tuner.get_best_pipeline().get_transform_from_name("opt")
+    assert best.choose == "pca"
+    assert (
+        best.get_transform_from_name("pca").estimator.n_components
+        == tuner.study.best_params["pipe__opt__pca__n_components"]
+    )

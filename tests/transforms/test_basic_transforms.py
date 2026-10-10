@@ -84,12 +84,13 @@ class TestCropTimeTransform:
         """Test cropping to a time window."""
         container = data_container_factory(n_trials=10, n_channels=8, n_time=100)
         # Time coordinates are 0 to 1, so crop to middle half
-        transform = CropTimeTransform(time_window_start_ms=250, time_window_end_ms=750)
+        transform = CropTimeTransform(start=0.25, end=0.75)
 
         result = transform.transform(container)
 
-        # Should have fewer time points
-        assert result.data.sizes["time"] < container.data.sizes["time"]
+        # Should keep the middle half of the time points
+        assert 0 < result.data.sizes["time"] < container.data.sizes["time"]
+        assert result.data["time"].min() >= 0.25 and result.data["time"].max() <= 0.75
         assert result.data.sizes["trial"] == 10
         assert result.data.sizes["channel"] == 8
 
@@ -125,14 +126,17 @@ class TestIdentityTransform:
     """Test IdentityTransform."""
 
     def test_identity_returns_same(self, data_container_factory):
-        """Test that identity returns the same container."""
+        """Test that identity returns the same values without mutating the input's history."""
         container = data_container_factory(n_trials=10, n_channels=8, n_time=100)
+        history_before = list(container.data.attrs["data_history"])
         transform = IdentityTransform()
 
         result = transform.transform(container)
 
-        # Should return the exact same instance
-        assert result is container
+        assert result is not container
+        assert result.data.values is container.data.values
+        assert container.data.attrs["data_history"] == history_before
+        assert len(result.data.attrs["data_history"]) == len(history_before) + 1
 
 
 class TestTransposeDimsTransform:
@@ -275,3 +279,84 @@ class TestBalanceClassWeightTransform:
         weights = result.data.coords["sample_weight"].values
         assert np.isclose(weights[:3].sum(), 0.25)
         assert np.isclose(weights[3:].sum(), 0.75)
+
+
+def test_unflatten_keeps_coords_that_vary_along_unstacked_dims():
+    import xarray as xr
+
+    from xdflow.core.data_container import DataContainer
+    from xdflow.transforms.basic_transforms import FlattenTransform, UnflattenTransform
+
+    da = xr.DataArray(
+        np.arange(12.0).reshape(3, 4),
+        dims=("trial", "time"),
+        coords={
+            "trial": [0, 1, 2],
+            "time": [0, 1, 2, 3],
+            "stim": ("trial", ["a", "b", "a"]),
+            "event": (("trial", "time"), np.arange(12).reshape(3, 4)),
+        },
+    )
+    flat = FlattenTransform(dims=("trial", "time")).transform(DataContainer(da))
+    unflatten = UnflattenTransform("flat_trial__time")
+    back = unflatten.transform(flat).data
+
+    assert back["stim"].dims == ("trial",)
+    np.testing.assert_array_equal(back["event"].transpose("trial", "time").values, da["event"].values)
+    assert unflatten.get_expected_output_dims(("freq", "flat_trial__time")) == ("freq", "trial", "time")
+
+
+def test_balance_class_weights_are_computed_from_each_training_fold():
+    import xarray as xr
+    from sklearn.base import BaseEstimator, ClassifierMixin
+
+    from xdflow.composite import Pipeline
+    from xdflow.core.data_container import DataContainer
+    from xdflow.cv import KFoldValidator
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    weight_sums = []
+
+    class RecordingClassifier(ClassifierMixin, BaseEstimator):
+        def fit(self, X, y, sample_weight=None):
+            weight_sums.append(float(np.sum(sample_weight)))
+            self.classes_ = np.unique(y)
+            return self
+
+        def predict(self, X):
+            return np.full(len(X), self.classes_[0])
+
+    n = 60
+    data = DataContainer(
+        xr.DataArray(
+            np.random.default_rng(0).normal(size=(n, 2)),
+            dims=("trial", "feature"),
+            coords={"trial": np.arange(n), "feature": [0, 1], "label": ("trial", np.array(["a", "b", "b"] * 20))},
+        )
+    )
+    pipeline = Pipeline(
+        "weighted",
+        [
+            ("weights", BalanceClassWeightTransform(class_coord="label")),
+            ("clf", SKLearnPredictor(RecordingClassifier, sample_dim="trial", target_coord="label")),
+        ],
+    )
+    validator = KFoldValidator(n_splits=3, test_size=0.2, use_stateful_fit_cache=False, verbose=False)
+    validator.pipeline = pipeline
+    validator.cross_validate(data, verbose=False)
+
+    # 1/class_count weights computed on the fold itself sum to the number of classes
+    np.testing.assert_allclose(weight_sums, 2.0)
+
+
+def test_crop_time_raises_when_window_selects_nothing():
+    import xarray as xr
+
+    from xdflow.core.data_container import DataContainer
+    from xdflow.transforms.basic_transforms import CropTimeTransform
+
+    data = DataContainer(xr.DataArray(np.zeros((2, 50)), dims=("trial", "time"), coords={"time": np.arange(50) / 10}))
+
+    assert CropTimeTransform(0.5, 4.0).transform(data).data.sizes["time"] == 36
+    with pytest.raises(ValueError, match="selects no samples"):
+        CropTimeTransform(500, 4000).transform(data)  # milliseconds given for a time coordinate in seconds

@@ -3,13 +3,13 @@ Pipeline orchestration for the framework.
 """
 
 import builtins
+import copy
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
-from inspect import Parameter, signature
 from typing import Any, Self, cast
 
-from xdflow.core.base import Predictor, Transform
+from xdflow.core.base import Predictor, Transform, _init_param_names
 from xdflow.core.data_container import DataContainer
 
 
@@ -116,7 +116,11 @@ class CompositeTransform(Transform, ABC):
         super().__init__(
             sel=sel, drop_sel=drop_sel, transform_sel=transform_sel, transform_drop_sel=transform_drop_sel, **kwargs
         )
-        self.is_stateful = builtins.any(child.is_stateful for child in self.children)
+
+    @property
+    def is_stateful(self) -> bool:  # type: ignore[override]
+        # Derived on read so a child's set_params (e.g. use_fit=True) is reflected in CV's stateless/stateful split
+        return builtins.any(child.is_stateful for child in self.children)
 
     @property
     @abstractmethod
@@ -263,12 +267,7 @@ class CompositeTransform(Transform, ABC):
 
             return value
 
-        ctor = signature(type(self).__init__)
-        ctor_param_names = {
-            name
-            for name, p in ctor.parameters.items()
-            if name != "self" and p.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
-        }
+        ctor_param_names = _init_param_names(type(self))
         raw_params = self.get_params(deep=False) or {}
 
         # Ensure all constructor parameters are present in raw params
@@ -280,6 +279,9 @@ class CompositeTransform(Transform, ABC):
         filtered_params = {
             k: _recursive_clone_constructor_value(v) for k, v in raw_params.items() if k in ctor_param_names
         }
+        # Same as Predictor._get_clone_kwargs: clones must not share a (fitted) label encoder
+        if filtered_params.get("encoder") is not None:
+            filtered_params["encoder"] = copy.deepcopy(filtered_params["encoder"])
 
         return type(self)(**filtered_params)
 

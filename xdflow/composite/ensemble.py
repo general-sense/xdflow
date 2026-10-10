@@ -14,7 +14,7 @@ from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import LabelEncoder
 
 from xdflow.composite.base import CompositeTransform, TransformStep, _configure_transform_for_inference
-from xdflow.core.base import Predictor, Transform
+from xdflow.core.base import Predictor, Transform, _init_param_names
 from xdflow.core.data_container import DataContainer
 
 
@@ -232,6 +232,10 @@ class EnsemblePredictor(CompositeTransform, Predictor):
             drop_sel: Optional drop selection to apply before predicting
         """
 
+        unexpected = set(kwargs) - _init_param_names(Predictor)
+        if unexpected:
+            raise TypeError(f"{type(self).__name__} got unexpected keyword argument(s): {sorted(unexpected)}")
+
         # Set default for scoring_transform_func
         if scoring_transform_func is None:
             scoring_transform_func = _identity_transform
@@ -321,6 +325,13 @@ class EnsemblePredictor(CompositeTransform, Predictor):
     def children(self) -> list[Transform]:
         """Returns the transform objects from the ensemble members."""
         return [member.transform for member in self.members]
+
+    def get_transform_from_name(self, name: str) -> Transform:
+        """Returns the member transform with the given name (used for nested set_params)."""
+        for member in self.members:
+            if member.name == name:
+                return member.transform
+        raise KeyError(f"No ensemble member named '{name}'. Members: {[m.name for m in self.members]}")
 
     @property
     def is_predictor(self) -> bool:
@@ -448,17 +459,8 @@ class EnsemblePredictor(CompositeTransform, Predictor):
         ):
             raise ValueError(f"Calibration container must have target coordinate '{first_predictor.target_coord}'")
 
+        # Members' public predict() returns decoded labels, so score against the raw target values
         target_data = calibration_container.data.coords[first_predictor.target_coord].values
-
-        # Encode string labels to integers for scoring
-        if first_predictor.encoder is not None and hasattr(first_predictor.encoder, "classes_"):
-            try:
-                target_data = first_predictor.encoder.transform(target_data)
-            except (ValueError, AttributeError):
-                # If encoder transform fails, create a simple mapping
-                unique_labels = np.unique(target_data)
-                label_map = {label: i for i, label in enumerate(unique_labels)}
-                target_data = np.array([label_map[label] for label in target_data])
 
         # Compute scores for each member
         scores = []
@@ -534,20 +536,6 @@ class EnsemblePredictor(CompositeTransform, Predictor):
             self._compute_weights(calibration_data, **kwargs)
 
         return self
-
-    def fit_transform(self, container: DataContainer, **kwargs) -> DataContainer:
-        """
-        Fits and transforms all ensemble members.
-
-        Args:
-            container: DataContainer to fit on
-            **kwargs: Additional context/parameters passed through
-
-        Returns:
-            Self (fitted ensemble)
-        """
-
-        raise NotImplementedError("fit_transform is not implemented for EnsemblePredictor, should not be needed")
 
     def transform(self, container: DataContainer, **kwargs) -> DataContainer:
         """
@@ -1068,6 +1056,11 @@ class EnsemblePredictor(CompositeTransform, Predictor):
             raise ValueError("No predictions to ensemble")
 
         weights = self.weights
+
+        if not self.is_classifier:
+            # Continuous targets: weighted mean instead of voting
+            averaged = np.average(np.stack([pred.values for pred in predictions]), axis=0, weights=weights)
+            return predictions[0].copy(data=averaged)
 
         # For discrete predictions, we need to do weighted voting
         # Get unique classes across all predictions

@@ -26,6 +26,7 @@ except (ImportError, ModuleNotFoundError):
 
 from xdflow.composite import Pipeline, SwitchTransform
 from xdflow.composite.base import CompositeTransform
+from xdflow.core.base import Transform
 from xdflow.core.data_container import DataContainer, TransformError
 from xdflow.cv.base import CrossValidator
 from xdflow.transforms.sklearn_transform import SKLearnTransform
@@ -71,7 +72,7 @@ class Tuner:
         pruner: optuna.pruners.BasePruner | None = None,
         direction: str = "maximize",
         verbose: int = 1,
-        use_mlflow: bool = True,
+        use_mlflow: bool = False,
         mlflow_experiment_name: str = "",
         mlflow_metadata: dict[str, Any] | None = None,
         log_artifacts: bool = True,
@@ -110,7 +111,7 @@ class Tuner:
         self.cv_strategy = cv_strategy
         self.param_grid = param_grid
         self.initial_data = initial_data_container
-        self.sampler = sampler or TPESampler()
+        self.sampler = sampler or TPESampler(seed=random_seed)
         # Disable pruning by default; users can still supply a custom pruner
         self.pruner = pruner or optuna.pruners.NopPruner()
         self.direction = direction
@@ -342,16 +343,24 @@ class Tuner:
             elif hasattr(transform, "seed"):
                 transform.seed = random_seed
 
-            # If it's a SKLearnTransform, set the seed on the estimator
+            # If it's a SKLearnTransform, seed the model through set_params: that looks through an
+            # automatic MultiOutput wrapper (which has no random_state of its own), and
+            # `estimator__random_state` reaches the model inside an explicit MultiOutput estimator_cls.
             if isinstance(transform, SKLearnTransform):
-                if hasattr(transform.estimator, "random_state"):
-                    transform.estimator.random_state = random_seed
-                elif hasattr(transform.estimator, "seed"):
-                    transform.estimator.seed = random_seed
+                params = transform.get_params(deep=True)
+                for name in ("random_state", "seed", "estimator__random_state", "estimator__seed"):
+                    if name in params:
+                        transform.set_params(**{name: random_seed})
+                        break
 
             # Then, if it's a composite, recurse into its children
             if isinstance(transform, CompositeTransform):
-                for child_transform in transform.children:
+                children = list(transform.children)
+                # GroupApplyTransform's children exist only after fit; seed the template its groups are cloned from
+                template = getattr(transform, "transform_template", None)
+                if isinstance(template, Transform) and not any(child is template for child in children):
+                    children.append(template)
+                for child_transform in children:
                     _inject_random_seeds(child_transform, random_seed)
 
         for pipeline in self.pipelines_to_tune.values():
@@ -404,10 +413,20 @@ class Tuner:
             # Assign the complete tuned pipeline
             trial_validator.set_pipeline(trial_pipeline)
 
-            # 4. Run the cross-validation - CrossValidator handles stateless/stateful optimization automatically
-            score = trial_validator.cross_validate(initial_data, verbose=self.verbose_transforms)
+            # 4. Run the cross-validation - CrossValidator handles stateless/stateful optimization automatically.
+            # Each fold score is reported so the configured pruner can stop unpromising trials.
+            def pruning_callback(step_idx: int, fold_score: float) -> None:
+                trial.report(fold_score, step=step_idx)
+                if trial.should_prune():
+                    raise optuna.TrialPruned(f"Pruned at fold {step_idx} (score {fold_score:.4f})")
+
+            score = trial_validator.cross_validate(
+                initial_data, verbose=self.verbose_transforms, pruning_callback=pruning_callback
+            )
             return score
 
+        except optuna.TrialPruned:
+            raise
         except Exception as e:
             # Check if this is a numerical error we can recover from
             error_msg = str(e).lower()
@@ -423,6 +442,8 @@ class Tuner:
                 if self.verbose >= 1:
                     print(f"Trial {trial.number} failed due to numerical error: {e}")
                     print("Pruning trial and continuing optimization...")
+                # Recorded on the trial so `tune()` can report it if no trial completes.
+                trial.set_user_attr("error", f"{type(e).__name__}: {e}")
                 raise optuna.TrialPruned(f"Numerical error: {e}") from e
             else:
                 # Re-raise all other errors (unexpected errors or non-numerical errors)
@@ -565,27 +586,22 @@ class Tuner:
         available_choices = list(switch_transform.transform_from_name.keys())
         choice_candidates = available_choices
 
-        # Detect implicit choice params: keys that are not valid choice names
-        non_choice_keys = [k for k in step_param_grid.keys() if k not in available_choices]
-        implicit_use_choice = None
-        if non_choice_keys and ("identity" in available_choices) and len(available_choices) == 2:
-            # Provide implicit targeting of the non-identity branch if user gave params at the switch level
-            implicit_use_choice = next(c for c in available_choices if c != "identity")
+        implicit_use_choice = self._implicit_switch_choice(switch_transform, step_param_grid)
 
         # 1. Always suggest the 'choose' parameter from the available choices
         choose_param_name = f"{namespace_prefix}__{step_name}__choose"
         if implicit_use_choice is not None:
-            # Suggest for logging/tracking, but force the non-identity branch this trial
-            _ = trial.suggest_categorical(choose_param_name, choice_candidates)
-            selected_choice = implicit_use_choice
+            # Params given at the switch level target the non-identity branch; record the choice actually
+            # evaluated so the best trial's params rebuild the same pipeline
+            selected_choice = trial.suggest_categorical(choose_param_name, [implicit_use_choice])
         else:
             selected_choice = trial.suggest_categorical(choose_param_name, choice_candidates)
         params_to_set["choose"] = selected_choice
 
         # 2. Handle any non-choice parameters in the param grid (if any)
         for param_name, param_space in step_param_grid.items():
-            if param_name in available_choices:
-                continue  # This is a choice parameter, handle separately
+            if param_name in available_choices or implicit_use_choice is not None:
+                continue  # Choice parameters (and implicit branch params) are applied to the branch below
             # If this is a nested dict (likely composite child params), skip here;
             # they will be applied when handling choice_param_grid below.
             if isinstance(param_space, dict):
@@ -651,6 +667,16 @@ class Tuner:
 
         # Note: We no longer validate a manual 'choose' parameter since choices are auto-detected
 
+    @staticmethod
+    def _implicit_switch_choice(switch_transform: SwitchTransform, step_param_grid: dict[str, Any]) -> str | None:
+        """The non-identity branch of a two-way (identity / transform) switch whose grid gives params at the
+        switch level; those params tune that branch, which every trial then uses. None otherwise."""
+        available_choices = list(switch_transform.transform_from_name.keys())
+        non_choice_keys = [k for k in step_param_grid if k not in available_choices]
+        if non_choice_keys and "identity" in available_choices and len(available_choices) == 2:
+            return next(c for c in available_choices if c != "identity")
+        return None
+
     def _get_initial_params_for_switch(
         self,
         switch_transform: SwitchTransform,
@@ -673,7 +699,10 @@ class Tuner:
         # so the first trial evaluates the provided default choice. Subsequent
         # trials will still explore choices via suggest_categorical.
 
-        initial_choice = getattr(switch_transform, "choose", None)
+        # With implicit branch params every trial uses that branch, so the baseline must too
+        initial_choice = self._implicit_switch_choice(switch_transform, step_param_grid) or getattr(
+            switch_transform, "choose", None
+        )
         if initial_choice is None:
             return
 
@@ -749,6 +778,11 @@ class Tuner:
                 self.current_run_id = parent_run.info.run_id
         else:
             self._tune(n_trials, show_progress_bar, callbacks=None)
+
+        # Optuna's own "No trials are completed yet" hides why every trial was pruned, so name the errors.
+        if not self.study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,)):
+            errors = sorted({t.user_attrs["error"] for t in self.study.trials if "error" in t.user_attrs})
+            raise ValueError("No tuning trial completed." + "".join(f"\n  {error}" for error in errors))
 
         best_params = self.study.best_params
         best_score = self.study.best_value
@@ -885,28 +919,52 @@ class Tuner:
                     self._get_initial_params_for_switch(
                         target_transform, step_param_grid, namespace_prefix, step_name, initial_params
                     )
+
+                    # Also seed the selected branch's own params, so the baseline trial is the configured pipeline.
+                    implicit_choice = self._implicit_switch_choice(target_transform, step_param_grid)
+                    if implicit_choice is not None:
+                        initial_choice = implicit_choice
+                        branch_names = target_transform.transform_from_name.keys()
+                        choice_grid = {k: v for k, v in step_param_grid.items() if k not in branch_names}
+                    else:
+                        initial_choice = getattr(target_transform, "choose", None)
+                        if initial_choice not in step_param_grid:
+                            continue
+                        choice_grid = step_param_grid[initial_choice]
+                    choice_transform = target_transform.get_transform_from_name(initial_choice)
+                    choice_namespace = f"{namespace_prefix}__{step_name}__{initial_choice}"
+                    if isinstance(choice_transform, CompositeTransform):
+                        _get_initial_params(choice_transform, choice_grid, choice_namespace, initial_params)
+                    else:
+                        _get_leaf_initial_params(choice_transform, choice_grid, choice_namespace, initial_params)
                 elif isinstance(target_transform, CompositeTransform):
                     nested_namespace = f"{namespace_prefix}__{step_name}"
                     _get_initial_params(target_transform, step_param_grid, nested_namespace, initial_params)
                 else:
-                    for param_name, space in step_param_grid.items():
-                        current_value = target_transform.get_params(deep=False).get(param_name)
+                    _get_leaf_initial_params(
+                        target_transform, step_param_grid, f"{namespace_prefix}__{step_name}", initial_params
+                    )
 
-                        # If current_value is None, it means the parameter wasn't explicitly initialized.
-                        # In this case, skip enqueueing it and let Optuna sample it.
-                        if current_value is None:
-                            continue
+        def _get_leaf_initial_params(
+            target_transform: Any, param_grid: dict[str, Any], namespace: str, initial_params: dict[str, Any]
+        ):
+            for param_name, space in param_grid.items():
+                current_value = target_transform.get_params(deep=False).get(param_name)
 
-                        if not _is_value_in_space(current_value, space):
-                            raise ValueError(
-                                f"Parameter '{step_name}.{param_name}' has initialized value {current_value!r} "
-                                f"which is not within the param_grid space {space}. "
-                                f"Either update the initialization to use a value within the allowed range/choices, "
-                                f"or modify the param_grid to include the initialized value."
-                            )
+                # If current_value is None, it means the parameter wasn't explicitly initialized.
+                # In this case, skip enqueueing it and let Optuna sample it.
+                if current_value is None:
+                    continue
 
-                        optuna_param_name = f"{namespace_prefix}__{step_name}__{param_name}"
-                        initial_params[optuna_param_name] = current_value
+                if not _is_value_in_space(current_value, space):
+                    raise ValueError(
+                        f"Parameter '{namespace}.{param_name}' has initialized value {current_value!r} "
+                        f"which is not within the param_grid space {space}. "
+                        f"Either update the initialization to use a value within the allowed range/choices, "
+                        f"or modify the param_grid to include the initialized value."
+                    )
+
+                initial_params[f"{namespace}__{param_name}"] = current_value
 
         for pipeline_name, pipeline in self.pipelines_to_tune.items():
             # Only enqueue if there's a param grid for this pipeline
@@ -1019,8 +1077,14 @@ class Tuner:
             with mlflow.start_run(run_id=self.current_run_id):
                 mlflow.log_metric("test_score", score)
 
-                # Log confusion matrix
-                if self.log_artifacts:
+                # Log confusion matrix (single-label classification only; it is undefined otherwise)
+                final_predictor = validator.pipeline.predictive_transform
+                if (
+                    self.log_artifacts
+                    and final_predictor is not None
+                    and final_predictor.is_classifier
+                    and not getattr(final_predictor, "is_multilabel", False)
+                ):
                     artifact_path = "confusion_matrix.png"
                     validator.plot_confusion_matrix(
                         use_holdout=True, normalize=True, save_as=artifact_path, show_plot=False

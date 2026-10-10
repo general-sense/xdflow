@@ -2,6 +2,7 @@
 Transform classes for the pipeline framework.
 """
 
+import copy
 import time
 import warnings
 from abc import ABC, abstractmethod
@@ -15,6 +16,20 @@ from sklearn.preprocessing import LabelEncoder
 
 from xdflow.core.data_container import DataContainer
 from xdflow.utils.sample_weights import extract_sample_weights
+
+
+def _init_param_names(cls: type) -> set[str]:
+    """Constructor arguments ``clone()`` passes: the named ones, plus a parent's
+    ``_cooperative_init_kwarg_names`` when the constructor forwards ``**kwargs`` to reach it."""
+    params = signature(cls.__init__).parameters.values()
+    names = {
+        p.name
+        for p in params
+        if p.name != "self" and p.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+    }
+    if any(p.kind is Parameter.VAR_KEYWORD for p in params):
+        names |= set(getattr(cls, "_cooperative_init_kwarg_names", ()))
+    return names
 
 
 def _infer_dict_key_type(dict_obj: dict[Any, Any], raw_key: str) -> Any:
@@ -394,25 +409,14 @@ class Transform(ABC):
         """
         filtered_params = self._get_clone_kwargs()
 
-        ctor = signature(type(self).__init__)
-        ctor_param_names = {
-            name
-            for name, p in ctor.parameters.items()
-            if name != "self" and p.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
-        }
-        missing = ctor_param_names - filtered_params.keys()
+        missing = _init_param_names(type(self)) - filtered_params.keys()
         assert not missing, f"Clone kwargs missing constructor parameters for {self.__class__.__name__}: {missing}"
 
         return type(self)(**filtered_params)
 
     def _get_clone_kwargs(self) -> dict[str, Any]:
         """Return constructor keyword arguments for cloning."""
-        ctor = signature(type(self).__init__)
-        ctor_param_names = {
-            name
-            for name, p in ctor.parameters.items()
-            if name != "self" and p.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
-        }
+        ctor_param_names = _init_param_names(type(self))
         raw_params = self.get_params(deep=False) or {}
 
         return {k: v for k, v in raw_params.items() if k in ctor_param_names}
@@ -427,7 +431,18 @@ class Transform(ABC):
 
         Returns:
             self: The transform instance.
+
+        Raises:
+            ValueError: Before anything is applied, if a flat key is not a constructor argument:
+                ``clone()`` would drop it, so cross-validation folds would never fit it.
         """
+        init_names = _init_param_names(type(self))
+        unknown = [key for key in params if "__" not in key and key not in init_names]
+        if unknown:
+            raise ValueError(
+                f"{type(self).__name__} has no parameter(s) {unknown}; they are not constructor arguments, "
+                "so clone() would drop them."
+            )
         for key, value in params.items():
             if "__" not in key:
                 setattr(self, key, value)
@@ -453,6 +468,9 @@ class Transform(ABC):
     def _log_history(self, source_container: DataContainer, container: DataContainer) -> DataContainer:
         """Helper to log the transform to the DataArray's attributes."""
         log_entry = {"class": self.__class__.__name__, "params": self.get_params(deep=False)}
+        if container is source_container:
+            # Pass-through transforms return their input; rewrap so logging does not mutate the caller's container.
+            container = type(container)(container.data)
         attrs = dict(container.data.attrs)
         source_history = list(source_container.data.attrs.get("data_history", []))
         output_history = list(attrs.get("data_history", []))
@@ -537,14 +555,6 @@ class Predictor(Transform, ABC):
         # Check if target_coord is explicitly a list (not a pattern string)
         is_multi_target = isinstance(target_coord, list)
 
-        # For now, create a provisional target_coord_list
-        # This will be resolved at fit time if it's a pattern
-        if is_multi_target:
-            target_coord_list = target_coord
-        else:
-            # Could be single coord or pattern - will be resolved at fit time
-            target_coord_list = [target_coord] if isinstance(target_coord, str) else []
-
         if not is_classifier:
             if proba:
                 raise ValueError(
@@ -585,8 +595,6 @@ class Predictor(Transform, ABC):
         self.unknown_target_encoding = unknown_target_encoding
         self.sample_dim = sample_dim
         self.target_coord = target_coord  # Keep original (string or list)
-        self.target_coord_list = target_coord_list  # Normalized to list
-        self.is_multi_target = is_multi_target
         self.is_classifier = is_classifier
         self.is_multilabel = is_multilabel
         self.encoder = encoder
@@ -598,6 +606,30 @@ class Predictor(Transform, ABC):
         self._is_fitted = False
 
     # get_expected_output_dims is still abstract and must be implemented by subclasses
+
+    @property
+    def target_coord_list(self) -> list[str]:
+        """Targets a pattern resolved to at fit, else ``target_coord`` as a list. Derived on read so
+        ``set_params(target_coord=...)`` cannot leave a stale list behind."""
+        resolved = getattr(self, "_resolved_target_coords", None)
+        if resolved is not None:
+            return list(resolved)
+        if isinstance(self.target_coord, list):
+            return self.target_coord
+        return [self.target_coord] if isinstance(self.target_coord, str) else []
+
+    @property
+    def is_multi_target(self) -> bool:
+        resolved = getattr(self, "_resolved_target_coords", None)
+        return len(resolved) > 1 if resolved is not None else isinstance(self.target_coord, list)
+
+    def _get_clone_kwargs(self) -> dict[str, Any]:
+        kwargs = super()._get_clone_kwargs()
+        # A fitted encoder carries the global class order; copy it so refitting one clone's encoder
+        # never relabels another clone's predictions.
+        if kwargs.get("encoder") is not None:
+            kwargs["encoder"] = copy.deepcopy(kwargs["encoder"])
+        return kwargs
 
     @property
     def is_regressor(self) -> bool:
@@ -791,12 +823,6 @@ class Predictor(Transform, ABC):
         # Fit the transform
         fitted = self._fit(container, **kwargs)
 
-        # After fitting, check if target coordinates were resolved (for pattern matching)
-        if isinstance(fitted, Predictor) and hasattr(fitted, "_resolved_target_coords"):
-            resolved = cast(list[str], fitted._resolved_target_coords)
-            fitted.target_coord_list = resolved
-            fitted.is_multi_target = len(resolved) > 1
-
         if verbose:
             end_time = time.time()
             duration = end_time - start_time
@@ -848,12 +874,6 @@ class Predictor(Transform, ABC):
 
         # Fit using encoded labels
         self._fit(container_for_fit, **kwargs)
-
-        # After fitting, check if target coordinates were resolved (for pattern matching)
-        if hasattr(self, "_resolved_target_coords"):
-            resolved = cast(list[str], self._resolved_target_coords)
-            self.target_coord_list = resolved
-            self.is_multi_target = len(resolved) > 1
 
         self._is_fitted = True
 

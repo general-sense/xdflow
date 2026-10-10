@@ -1,63 +1,199 @@
 # XDFlow
 
-**Metadata-driven ML pipelines for labeled structured data**
+**ML pipelines for structured experimental data: correct by construction, fast, and hard to break.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PyPI](https://img.shields.io/pypi/v/xdflow.svg)](https://pypi.org/project/xdflow/)
+[![CI](https://github.com/general-sense/xdflow/actions/workflows/ci.yml/badge.svg)](https://github.com/general-sense/xdflow/actions/workflows/ci.yml)
+[![Docs](https://readthedocs.org/projects/xdflow/badge/?version=latest)](https://xdflow.readthedocs.io/en/latest/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-`xdflow` is a machine learning framework that leverages metadata in labeled structured data. Built on [xarray](https://xarray.dev/) objects, it uses dimensions and coordinates such as `trial`, `channel`, `time`, `stimulus`, `session`, and `subject` as pipeline context for transforms, prediction, cross-validation, tuning, and scoring.
+Experimental data has structure, with trials recorded from subjects, across sessions, over channels and time.
+`xdflow` keeps that structure in the data. It is built on [xarray](https://xarray.dev/), so dimensions and
+coordinates such as `trial`, `channel`, `time`, `subject` and `session` travel with every array through
+preprocessing, fitting, cross-validation, tuning and prediction, and your scikit-learn estimators plug
+straight in. Building on structure instead of bare arrays makes validation **correct** and **fast**, and
+analysis code **hard to break**.
 
-That lets the pipeline do more for you:
+## Structure is the data
 
-- Shape-preserving transforms operate on named dimensions, so `per_dim="trial"` means normalize each trial independently using statistics over the remaining dimensions.
-- Target, group, session, and subject coordinates drive validation without custom split code.
-- The pipeline knows which steps are stateful and which are reusable, so expensive stateless work runs once across folds and tuning trials.
-- Predictions, scores, and out-of-fold outputs stay tied to the coordinates that produced them, which makes alignment mistakes easier to catch.
+In a NumPy/scikit-learn workflow, structure lives outside the data. `X` is an anonymous array whose axes you
+remember by position, and labels, subject IDs, channel names and time stamps are side arrays you keep aligned
+by hand through every reshape, filter, crop and split. That bookkeeping is where most decoding bugs live, and
+they don't crash. They just give you a wrong number.
 
-sklearn-compatible estimators — sklearn, LightGBM, XGBoost, or your own — drop in via `SKLearnTransformer` and `SKLearnPredictor`.
+In xdflow, every step addresses the data by name:
 
-For comparison, in a plain NumPy/sklearn workflow, structure like this usually becomes side data:
+- **Time by value:** `CropTimeTransform(0.5, 4.0)` selects 0.5–4.0 s from the time coordinate, not an index
+  range you computed by hand. A window that selects nothing raises.
+- **Dimensions by name:** `per_dim="trial"`, `dims=("channel", "time")`, never `axis=2`. A misspelled
+  dimension raises instead of silently pooling over everything.
+- **Channels and features by name:** every fitted step (spatial filters, PCA, whitening, your scikit-learn
+  model) sees channels and features by label, whatever order a new recording lists them in. A missing channel
+  raises.
+- **Metadata travels with every trial:** labels, subjects and sessions follow each trial through filtering,
+  reordering, splitting and prediction, so there is no side array to fall out of sync.
+- **Results keep their context:** out-of-fold and holdout predictions carry their trial coordinates, so
+  per-subject or per-condition results are a `groupby`.
 
-```text
-X.shape          # (180, 100)        # was (180, 4, 25)
-y                # was a coordinate
-sessions         # tracked separately
-channel_names    # tracked separately
+## Correct and fast
+
+Every step in a decoding pipeline either learns from data or it doesn't. Scalers, CSP, PCA, feature
+selection and the model learn. Filtering, cropping and per-trial spectral features don't. To validate the
+pipeline, you have to decide where each step runs:
+
+- **Refit everything inside every fold.** This keeps preprocessing from leaking, but expensive feature
+  extraction is recomputed for every fold, and again for every hyperparameter trial.
+- **Compute features once, then cross-validate the model.** This is fast, but the moment a learned step
+  ends up in the precomputed part, validation and holdout data leak into training and the scores inflate.
+
+Hand-written code fixes a point on that line per project, and it has to be re-checked whenever the pipeline
+changes. **`xdflow` finds the optimal point for you, automatically, at every level:**
+
+1. **The validation split point.** The pipeline is cut before its first step that learns. Everything before
+   the cut runs once on all trials. Everything after it is cloned and refit inside each training fold, and
+   holdout trials are left out of every learned fit and every CV score. The cut follows the configuration:
+   a composite step counts as learning if any part of it does, and parameters such as
+   `ZScoreTransform(use_fit=True)` turn a step into a learning one. Editing or tuning the pipeline
+   therefore can't strand a learned step before the cut. Every step declares whether it learns: built-in
+   transforms do it for you, and a custom transform does it in one line.
+2. **Reuse across folds, tuning trials and runs.** The shared part runs once per validation run. With
+   caching on (the default when tuning; `Pipeline(use_cache=True)` otherwise), its output is stored under
+   a hash of the data values, coordinates and attrs, every step's configuration, and the code. Tuning
+   trials that only change later steps reuse it instead of recomputing features. Fitted fold models are
+   cached under their exact training set.
+3. **Splits by name.** Folds and holdouts are defined by coordinates such as `subject` or `session`, so
+   keeping correlated samples apart is one argument rather than a `groups` array kept in sync by hand.
+   You choose what to keep apart; xdflow keeps it in sync, everywhere.
+
+### Measured
+
+**Safety: leakage makes a decoder look far better than it is.** Same data, same model, validated two ways.
+The higher number is wrong, and xdflow gives you the right one.
+
+| Same data, same model | Validated with leakage ✗ | Validated correctly ✓ |
+|---|---|---|
+| EEG motor imagery, within subject: CSP fit before vs inside CV ([walkthrough](docs/tutorials/eeg-motor-imagery.md)) | 0.96, inflated | **0.64** |
+| EEG motor imagery, across subjects: same shortcut | 0.78, inflated | **0.56** (≈ chance) |
+| Activity recognition, 30 people: shuffled windows vs subjects kept apart ([walkthrough](docs/tutorials/har-activity.md)) | 0.97, inflated (and picks the wrong model) | **0.91** (9 unseen test people: 0.92) |
+
+Learned steps are refit inside each fold automatically (EEG rows); keeping subjects apart is a single
+argument (HAR row). Full details in each walkthrough.
+
+**Robustness: positional code breaks silently; named data doesn't.** The same model, tested on the same
+trials, with the channels listed in a different order (as another session or export tool might):
+
+| Same CSP + LDA model, EEG within subject | Original channel order | Shuffled channel order |
+|---|---|---|
+| Plain NumPy + scikit-learn | 0.64 | **0.52**, chance, with no error ✗ |
+| xdflow | 0.64 | **0.64** ✓ |
+
+([`examples/robustness_channel_order.py`](examples/robustness_channel_order.py))
+
+**Speed: correct *and* fast.** Tuning a leak-free spectral pipeline (multitaper spectra → z-score →
+logistic regression) over 10 values of C with 5-fold CV. Same folds, same features, identical scores in all
+three:
+
+| Every step recomputed in every fold | scikit-learn `Pipeline(memory=...)` + `GridSearchCV` | xdflow |
+|---|---|---|
+| 91 s | 29 s | **2.9 s** |
+
+**8–10× faster than scikit-learn's cached pipeline, ~30× faster than refitting everything** (two runs,
+M3 Max). scikit-learn's cache still recomputes features for every training fold and every validation fold;
+xdflow computes them once. The more expensive your feature extraction, the bigger the win.
+([benchmark script](examples/benchmark_split_and_cache.py))
+
+## Bring your own MNE epochs
+
+```python
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+
+from xdflow import LeaveGroupOutValidator, Pipeline, from_mne_epochs
+from xdflow.transforms.csp import CSPTransform
+from xdflow.transforms.sklearn_transform import SKLearnPredictor
+from xdflow.transforms.spectral import BandpassFilterTransform
+
+data = from_mne_epochs(epochs)  # event names -> "label"; metadata columns (e.g. "subject") -> coordinates
+
+pipeline = Pipeline(
+    "csp_lda",
+    [
+        ("bandpass", BandpassFilterTransform(8, 30, fs=epochs.info["sfreq"])),  # learns nothing: runs once
+        ("csp", CSPTransform(n_components=6)),  # learns: refit inside every fold
+        ("lda", SKLearnPredictor(LinearDiscriminantAnalysis, sample_dim="trial", target_coord="label")),
+    ],
+)
+
+cv = LeaveGroupOutValidator(group_coord="subject", scoring="accuracy")  # leave one subject out
+cv.set_pipeline(pipeline)
+cv.cross_validate(data)
+
+oof = cv.oof_predictions_container_.data  # predictions keep trial, subject and every other coordinate
+(oof == oof["label"]).groupby("subject").mean()  # accuracy per subject, no index arrays
+model = cv.finalize_pipeline(data)  # refit on all data for inference: model.predict(new_data)
 ```
 
-`xdflow` removes this side-data bookkeeping by making structure part of the pipeline itself.
+`pip install "xdflow[mne]"` for `CSPTransform`; `from_mne_epochs` itself needs nothing beyond your `Epochs`.
 
----
+## Using an existing scikit-learn pipeline
+
+Wrap the model you already use and get xdflow's validation, caching, per-subject results and tuning around it,
+without rewriting anything:
+
+```python
+from mne.decoding import CSP
+from sklearn.pipeline import make_pipeline
+
+existing = make_pipeline(CSP(n_components=6, log=True), LinearDiscriminantAnalysis())  # unchanged
+model = SKLearnPredictor.from_estimator(existing, sample_dim="trial", target_coord="label")
+
+pipeline = Pipeline(
+    "mine",
+    [
+        ("bandpass", BandpassFilterTransform(8, 30, fs=160)),  # computed once, shared by every fold
+        ("model", model),  # your pipeline, refit inside every fold
+    ],
+)
+cv.set_pipeline(pipeline)
+cv.cross_validate(data)
+```
+
+Its parameters stay tunable by their usual names (`csp__n_components`), and multi-dimensional input such
+as `trial × channel × time` is passed straight through. Move steps out of it into xdflow one at a time, when
+you want them computed once instead of per fold.
+
+## Try it
+
+| Example | What it shows | |
+|---|---|---|
+| [Quickstart](docs/tutorials/quickstart.md) | The core API on synthetic data, in seconds | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-sense/xdflow/blob/main/examples/notebooks/quickstart.ipynb) |
+| [EEG motor imagery](docs/tutorials/eeg-motor-imagery.md) | Within- and cross-subject decoding; the CSP leakage shortcut | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-sense/xdflow/blob/main/examples/notebooks/eeg_motor_imagery.ipynb) |
+| [Human activity recognition](docs/tutorials/har-activity.md) | Wearable sensors, 30 subjects; subject leakage in random K-fold | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/general-sense/xdflow/blob/main/examples/notebooks/har_activity.ipynb) |
 
 ## Installation
 
 ```bash
-# Core framework (minimal dependencies)
-pip install xdflow
-
-# With hyperparameter tuning
-pip install xdflow[tuning]
-
-# With all extras (LightGBM, visualization, MLflow, spectral analysis)
-pip install xdflow[all]
+pip install xdflow            # core
+pip install "xdflow[tuning]"  # + Optuna hyperparameter search
+pip install "xdflow[mne]"     # + MNE-Python interop (CSPTransform)
+pip install "xdflow[all]"     # + LightGBM, MLflow, MNE, plotting, multitaper spectra, domain adaptation
 ```
 
-**Requirements**: Python 3.11+
+Python 3.11+.
 
----
+## Quick example
 
-## Quick Example
+Runs with the core install; the full version is [`examples/quickstart.py`](examples/quickstart.py).
 
-This example works with the core install. A full runnable version lives at `examples/quickstart.py`.
+<details>
+<summary>Show the code</summary>
 
 ```python
 import numpy as np
 import xarray as xr
 from sklearn.linear_model import LogisticRegression
 
-from xdflow.composite import Pipeline
-from xdflow.core import DataContainer
-from xdflow.cv import KFoldValidator
+from xdflow import DataContainer, KFoldValidator, Pipeline
 from xdflow.transforms.basic_transforms import FlattenTransform
 from xdflow.transforms.normalization import ZScoreTransform
 from xdflow.transforms.sklearn_transform import SKLearnPredictor
@@ -65,149 +201,102 @@ from xdflow.transforms.sklearn_transform import SKLearnPredictor
 rng = np.random.default_rng(0)
 stimuli = np.repeat(["rest", "tone", "odor"], 60)
 rng.shuffle(stimuli)
-
 values = rng.normal(0.0, 1.2, size=(stimuli.size, 4, 25))
 values[stimuli == "tone", 1, 8:15] += 1.5
 values[stimuli == "odor", 2, 14:22] += 1.5
 
-data = xr.DataArray(
-    values,
-    dims=("trial", "channel", "time"),
-    coords={
-        "trial": np.arange(stimuli.size),
-        "channel": [f"ch{i}" for i in range(4)],
-        "time": np.linspace(-0.2, 0.8, 25),
-        "stimulus": ("trial", stimuli),
-    },
+data = DataContainer(
+    xr.DataArray(
+        values,
+        dims=("trial", "channel", "time"),
+        coords={
+            "trial": np.arange(stimuli.size),
+            "channel": [f"ch{i}" for i in range(4)],
+            "time": np.linspace(-0.2, 0.8, 25),
+            "stimulus": ("trial", stimuli),
+        },
+    )
 )
-container = DataContainer(data)
 
 pipeline = Pipeline(
     name="core_quickstart",
     steps=[
-        ("zscore", ZScoreTransform(per_dim="trial")),
+        ("zscore", ZScoreTransform(per_dim="trial")),  # each trial over its own channels and time
         ("flatten", FlattenTransform(dims=("channel", "time"))),
-        (
-            "classifier",
-            SKLearnPredictor(
-                LogisticRegression,
-                sample_dim="trial",
-                target_coord="stimulus",
-                max_iter=500,
-            ),
-        ),
+        ("classifier", SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="stimulus", max_iter=500)),
     ],
 )
 
-cv = KFoldValidator(
-    n_splits=5,
-    shuffle=True,
-    random_state=0,
-    stratify_coord="stimulus",
-    scoring="f1_weighted",
-    verbose=False,
-)
+cv = KFoldValidator(n_splits=5, shuffle=True, random_state=0, stratify_coord="stimulus", scoring="f1_weighted")
 cv.set_pipeline(pipeline)
-
-score = cv.cross_validate(container, verbose=False)
-print(f"Weighted F1: {score:.3f}")
-
-# Coordinates stay attached, and stateful steps are refit per fold.
+print(f"Weighted F1: {cv.cross_validate(data):.3f}")
 ```
 
----
+</details>
 
-## Key Features
+## What you get
 
-- **Dimension contracts**: transforms declare the dimensions they consume and produce, so invalid reshapes and step handoffs fail earlier.
-- **Composition primitives**: sequential `Pipeline`, parallel `TransformUnion`, conditional `SwitchTransform`, per-group `GroupApplyTransform`, and toggleable `OptionalTransform`.
-- **Leakage-aware cross-validation**: validators split on named trial, target, and group coordinates; stateful steps refit only on training folds; out-of-fold predictions are emitted for stacking and ensembles.
-- **Fold-invariant caching**: expensive stateless work such as spectrograms or filtering can run once and be reused across folds and tuning trials.
-- **Hyperparameter tuning**: Optuna-based search across pipeline architectures, reusable static-prefix caching across tuning trials, optional MLflow logging, and explicit seed management.
-- **Pluggable estimators**: any class implementing the sklearn API, including sklearn itself, LightGBM, XGBoost, or your own, drops into the pipeline via `SKLearnTransformer` and `SKLearnPredictor`.
-- **Multi-output support**: a unified interface for multi-target regression, multilabel classification, and sample-weighted training with sklearn-compatible estimators.
-- **Explicit API contracts**: focused transform, predictor, and validation interfaces keep custom code small enough to write, test, review, and generate with LLM coding tools.
----
+- **Metadata that survives.** Out-of-fold and holdout predictions keep their trial coordinates, so results
+  can be broken down by subject, session, or condition with a `groupby`.
+- **Composition.** `Pipeline`, `TransformUnion`, `SwitchTransform`/`OptionalTransform` for architecture
+  search, `GroupApplyTransform` for per-subject or per-session models, `EnsemblePredictor`.
+- **Tuning.** Optuna search over parameters *and* pipeline structure, with seeds threaded through every
+  step, pruning, and optional MLflow tracking.
+- **Your estimators.** scikit-learn, LightGBM, XGBoost, or anything with the sklearn API, via
+  `SKLearnPredictor`/`SKLearnTransformer`, or wrap an existing estimator or `Pipeline` as-is with
+  `SKLearnPredictor.from_estimator`. Multi-target regression, multilabel classification, and sample
+  weights are supported.
+- **Small, explicit contracts.** A custom transform is a class with `_fit`/`_transform` and declared
+  dimensions. It is easy to write, test, review, and generate with LLM coding tools
+  ([guide](docs/guides/llm.md)).
+
+## Works with the tools you already use
+
+- **scikit-learn.** `xdflow` builds on it: scikit-learn estimators, metrics and splitters plug in, and an
+  existing `Pipeline` wraps as-is with `SKLearnPredictor.from_estimator`. On top of that, metadata lives in
+  the data, splits are named, and stateless features are computed once for all folds and tuning trials,
+  where `Pipeline(memory=...)` recomputes them for every fold.
+- **MNE-Python.** `from_mne_epochs` brings `Epochs` in with their labels and metadata, and `CSPTransform`
+  turns `mne.decoding.CSP` into a fold-safe pipeline step.
+- **sklearn-xarray** brings xarray to scikit-learn estimators. `xdflow` adds a learned-or-not declaration
+  on every step, which drives the split point and the caching above, plus holdouts, per-group models and
+  Optuna tuning over pipeline structure.
+
+## Status
+
+Actively developed and used in research code. Changes are tracked in the [changelog](CHANGELOG.md). Feedback
+and use cases are very welcome in [issues](https://github.com/general-sense/xdflow/issues).
 
 ## Documentation
 
-**[Full Documentation](https://xdflow.readthedocs.io/en/latest/)**
-
-XDFlow is designed for custom transforms, predictors, and validation policies. See
-[Writing Custom Transforms](docs/guides/writing-transforms.md) and
-[Writing Custom Cross-Validators](docs/guides/writing-cross-validators.md) for examples.
-
-**Quick Links**:
-
-- [Data Contract](docs/concepts/data_contract.md)
-- [Installation & Setup](docs/installation.md)
-- [5-Minute Core Quickstart](docs/tutorials/quickstart.md)
-- [Core Concepts](docs/concepts/index.md)
-- [Tutorials](docs/tutorials/index.md)
-- [Writing Custom Transforms](docs/guides/writing-transforms.md)
-- [Writing Custom Cross-Validators](docs/guides/writing-cross-validators.md)
-- [Using XDFlow With LLMs](docs/guides/llm.md)
-- [API Reference](docs/api/index.md)
-
----
+**[xdflow.readthedocs.io](https://xdflow.readthedocs.io/en/latest/)**: [concepts](docs/concepts/index.md),
+[tutorials](docs/tutorials/index.md), [writing custom transforms](docs/guides/writing-transforms.md) and
+[cross-validators](docs/guides/writing-cross-validators.md), and the [API reference](docs/api/index.md).
 
 ## Contributing
 
-We welcome contributions! Whether you're:
-
-- Adding a new transform
-- Improving documentation
-- Reporting bugs
-- Requesting features
-- Sharing use cases
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-**Early adopters especially welcome** - the API is still stabilizing, and your feedback shapes the future of this project.
-
-### Development Setup
-
-This project uses [uv](https://docs.astral.sh/uv/) for dependency management.
+Contributions are welcome: new transforms, validators, examples on your own kind of data, bug reports, and
+documentation fixes. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```bash
-# Install uv (if you don't have it)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Clone and install
-git clone https://github.com/canaery/xdflow.git
+git clone https://github.com/general-sense/xdflow.git
 cd xdflow
-uv sync --all-extras    # creates .venv and installs everything
-
-# Run commands via uv
-uv run pytest                            # run tests
-uv run ruff check xdflow tests examples  # lint
-
-# Or activate the venv directly
-source .venv/bin/activate
-pytest
+uv sync --all-extras   # creates .venv with everything
+uv run pytest
+uv run ruff check .
 ```
 
----
+## Citing
+
+If you use `xdflow` in published work, please cite it using the metadata in [CITATION.cff](CITATION.cff)
+(GitHub's "Cite this repository" button).
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
-
----
-
-## Acknowledgments
-
-- [xarray](https://xarray.dev/) - Labeled multidimensional arrays
-- [scikit-learn](https://scikit-learn.org/) - ML fundamentals
-- [Optuna](https://optuna.org/) - Hyperparameter optimization
-- [MLflow](https://mlflow.org/) - Experiment tracking
-
----
+MIT; see [LICENSE](LICENSE).
 
 ## Contact
 
 - **Lead maintainer**: [Julien Bloch](https://github.com/julien-bloch)
-- **GitHub Issues**: [Report bugs or request features](https://github.com/canaery/xdflow/issues)
-- **Discussions**: [Ask questions, share ideas](https://github.com/canaery/xdflow/discussions)
+- **Issues**: [bugs and feature requests](https://github.com/general-sense/xdflow/issues)
 
-The repository is hosted under `canaery/xdflow` for continuity with the project's original organization name.

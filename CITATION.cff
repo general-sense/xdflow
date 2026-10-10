@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use xdflow in your work, please cite it as below."
+type: software
+title: "xdflow: metadata-driven machine-learning pipelines for labeled structured data"
+abstract: >-
+  xdflow is a Python framework for machine-learning pipelines on labeled, structured data built on
+  xarray. Dimensions and coordinates such as trial, channel, time, subject and session travel with the
+  data through preprocessing, fitting, cross-validation, tuning and prediction, so splits are requested
+  by name and stateful steps are refit inside each training fold.
+authors:
+  - family-names: Bloch
+    given-names: Julien
+  - family-names: Chang
+    given-names: Joanna
+repository-code: "https://github.com/general-sense/xdflow"
+url: "https://xdflow.readthedocs.io"
+license: MIT
+version: "0.3.0"
+date-released: "2026-10-09"
+keywords:
+  - machine learning
+  - xarray
+  - cross-validation
+  - data leakage
+  - neuroscience
+  - time series

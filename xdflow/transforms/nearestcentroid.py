@@ -143,6 +143,7 @@ class NearestCentroid(SKLearnTransformer):
         output_dim_name: str = "component",
         sel: dict | None = None,
         drop_sel: dict | None = None,
+        sample_weight_coord: str | None = "sample_weight",
         **kwargs,
     ):
         super().__init__(
@@ -154,5 +155,6 @@ class NearestCentroid(SKLearnTransformer):
             drop_sel=drop_sel,
             n_components=n_components,
             use_priors=use_priors,
+            sample_weight_coord=sample_weight_coord,
             **kwargs,
         )

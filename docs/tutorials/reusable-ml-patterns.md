@@ -21,7 +21,7 @@ predictor = SKLearnPredictor(
 )
 
 predictor.fit(train_container)
-predictions = predictor.predict(test_container)        # dims: ("trial", "target")
+predictions = predictor.predict(test_container)  # dims: ("trial", "target")
 probabilities = predictor.predict_proba(test_container)  # dims: ("trial", "target")
 ```
 

@@ -7,6 +7,12 @@ import xarray as xr
 from xdflow.core.data_container import DataContainer
 
 
+@pytest.fixture(autouse=True)
+def isolated_cache_dir(tmp_path, monkeypatch):
+    """Keep xdflow's on-disk caches per test, so tests never hit results cached by other runs."""
+    monkeypatch.setenv("XDFLOW_CACHE_DIR", str(tmp_path / "xdflow_cache"))
+
+
 @pytest.fixture
 def random_seed():
     """Set random seed for reproducibility."""

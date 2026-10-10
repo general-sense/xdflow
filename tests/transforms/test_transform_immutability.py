@@ -68,7 +68,7 @@ def test_function_transform_immutability(data_container_factory, assert_transfor
 def test_crop_time_transform_immutability(data_container_factory, assert_transform_immutability):
     """Test CropTimeTransform immutability."""
     container = data_container_factory(n_trials=10, n_channels=8, n_time=100)
-    transform = CropTimeTransform(time_window_start_ms=10, time_window_end_ms=50)
+    transform = CropTimeTransform(start=0.1, end=0.5)
     assert_transform_immutability(transform, container)
 
 
@@ -77,8 +77,8 @@ def test_identity_transform_immutability(data_container_factory, assert_transfor
     container = data_container_factory(n_trials=10, n_channels=8, n_time=100)
     transform = IdentityTransform()
 
-    # should return the same container instance, so should error
-    with pytest.raises(AssertionError, match="returned the same container instance!"):
+    # returns a new container sharing the input values, so should error as a view
+    with pytest.raises(AssertionError, match="returned a view of the original data!"):
         assert_transform_immutability(transform, container)
 
 

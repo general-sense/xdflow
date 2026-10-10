@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from inspect import Parameter, signature
 from typing import Any
 
@@ -55,3 +56,41 @@ def collect_super_init_param_names(child_cls: type[Any], stop_class: type[Any]) 
             continue
         params.update(_get_declared_init_params(cls))
     return params
+
+
+def build_estimator(factory: Any, kwargs: dict[str, Any]) -> Any:
+    """Build an estimator from a class or a factory (lambda, ``functools.partial``, xdflow wrapper factory).
+
+    ``clone()`` passes back every current estimator parameter, but a factory may accept fewer arguments than
+    the estimator it builds exposes, or accept ``**kwargs`` and ignore them. The factory gets the arguments
+    it declares; afterwards, any argument it did not take, or whose value did not come out as requested, is
+    set on the built estimator (unknown names raise in ``set_params``).
+    """
+    if inspect.isclass(factory) or not kwargs or getattr(factory, "_forwards_kwargs_to_base", False):
+        # Classes take their params directly; xdflow's wrapper factories build their base model with
+        # build_estimator themselves, and their own params share names with the base model's.
+        return factory(**kwargs)
+    try:
+        parameters = signature(factory).parameters
+    except (TypeError, ValueError):  # signature not introspectable
+        return factory(**kwargs)
+    takes_any = any(p.kind is Parameter.VAR_KEYWORD for p in parameters.values())
+    accepted = dict(kwargs) if takes_any else {k: v for k, v in kwargs.items() if k in parameters}
+    estimator = factory(**accepted)
+    get_params = getattr(estimator, "get_params", None)
+    current = get_params(deep=False) if callable(get_params) else {}
+    to_set = {
+        k: v
+        for k, v in kwargs.items()
+        if k not in accepted or (k in current and current[k] is not v and not _equal_param(current[k], v))
+    }
+    if to_set:
+        estimator.set_params(**to_set)
+    return estimator
+
+
+def _equal_param(a: Any, b: Any) -> bool:
+    try:
+        return bool(a == b)
+    except Exception:  # arrays and objects without a scalar equality
+        return False

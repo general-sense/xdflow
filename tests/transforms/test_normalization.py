@@ -1,6 +1,7 @@
 """Tests for normalization transforms (Demean and ZScore)."""
 
 import numpy as np
+import pytest
 
 from xdflow.transforms.normalization import DemeanTransform, ZScoreTransform
 
@@ -139,7 +140,6 @@ class TestNormalizationComparison:
         assert set(params) == {
             "per_dim",
             "use_fit",
-            "is_stateful",
             "fit_sel",
             "sel",
             "drop_sel",
@@ -171,3 +171,32 @@ class TestNormalizationComparison:
 
         trial_time_means = result.data.mean(dim=["trial", "time"])
         np.testing.assert_array_almost_equal(trial_time_means.values, 0, decimal=10)
+
+
+def test_stateless_normalization_warns_only_when_pooling_trials():
+    import warnings
+
+    import numpy as np
+    import xarray as xr
+
+    from xdflow.core.data_container import DataContainer
+
+    data = DataContainer(xr.DataArray(np.random.default_rng(0).normal(size=(4, 3)), dims=("trial", "channel")))
+    with pytest.warns(UserWarning, match="across trials"):
+        ZScoreTransform(per_dim="channel").transform(data)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ZScoreTransform(per_dim="trial").transform(data)
+        ZScoreTransform(per_dim="channel", use_fit=True).fit_transform(data)
+
+
+def test_per_dim_must_name_an_existing_dim():
+    import xarray as xr
+
+    from xdflow.core.data_container import DataContainer
+
+    data = DataContainer(xr.DataArray(np.zeros((4, 3)), dims=("trial", "flat_channel__time")))
+    with pytest.raises(ValueError, match="not found in data dims"):
+        ZScoreTransform(per_dim="feature", use_fit=True).fit_transform(data)
+    with pytest.raises(ValueError, match="not found in data dims"):
+        DemeanTransform(per_dim="feature").transform(data)

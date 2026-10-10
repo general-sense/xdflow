@@ -32,6 +32,7 @@ from xdflow.cv import (
     LeaveSessionOutValidator,
     SampledDomainKFoldValidator,
 )
+from xdflow.interop import from_mne_epochs
 
 # Hyperparameter tuning (optional dependency: optuna)
 try:
@@ -49,6 +50,7 @@ __all__ = [
     "Predictor",
     "DataContainer",
     "TransformError",
+    "from_mne_epochs",
     # Composite
     "Pipeline",
     "TransformUnion",

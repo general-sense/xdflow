@@ -36,7 +36,9 @@ def get_da_by_conditions(da: xr.DataArray, conditions: dict[str, Any]) -> xr.Dat
         "animal": 35                    # equals 35
     }
     """
-    mask_dict = {}
+    # Per-dimension boolean masks as 1D NumPy arrays, applied with positional `isel` rather than
+    # `where(drop=True)`, which silently casts int/bool data to float64 via its NaN fill.
+    dim_masks: dict[Hashable, np.ndarray] = {}
     for key, value in conditions.items():
         coord = da[key]
 
@@ -45,44 +47,47 @@ def get_da_by_conditions(da: xr.DataArray, conditions: dict[str, Any]) -> xr.Dat
                 f"Coordinate {key} has {len(coord.dims)} dimensions, conditions must be applied to a single dimension"
             )
         coord_dim = coord.dims[0]
+        coord_vals = np.asarray(coord.values)
 
-        mask = mask_dict.get(coord_dim, True)
+        mask = dim_masks.get(coord_dim)
+        if mask is None:
+            mask = np.ones(coord_vals.shape[0], dtype=bool)
 
         # --- Operator-based conditions ---
         if isinstance(value, dict):
             for op, val in value.items():
                 if op == ">":
-                    mask &= coord > val
+                    mask &= coord_vals > val
                 elif op == ">=":
-                    mask &= coord >= val
+                    mask &= coord_vals >= val
                 elif op == "<":
-                    mask &= coord < val
+                    mask &= coord_vals < val
                 elif op == "<=":
-                    mask &= coord <= val
+                    mask &= coord_vals <= val
                 elif op == "!=":
                     if isinstance(val, (list)):
-                        mask &= ~coord.isin(val)
+                        mask &= ~np.isin(coord_vals, val)
                     else:
-                        mask &= coord != val
+                        mask &= coord_vals != val
                 else:
                     raise ValueError(f"Unsupported operator: {op}")
 
         # --- Range ---
         elif isinstance(value, tuple) and len(value) == 2 and not isinstance(value[0], bool):
-            mask &= (coord >= value[0]) & (coord <= value[1])
+            mask &= (coord_vals >= value[0]) & (coord_vals <= value[1])
 
         # --- Membership ---
-        elif isinstance(value, list):
-            mask &= coord.isin(value)
+        elif isinstance(value, (list, np.ndarray)):
+            mask &= np.isin(coord_vals, value)
 
         # --- Equality ---
         else:
-            mask &= coord == value
+            mask &= coord_vals == value
 
-        mask_dict[coord_dim] = mask
+        dim_masks[coord_dim] = mask
 
-    for key in mask_dict:
-        da = da.where(mask_dict[key], drop=True)
+    for dim, mask in dim_masks.items():
+        da = da.isel({dim: mask})
 
     return da
 
@@ -136,14 +141,14 @@ def stratified_sample(da, coord_name, max_samples_per_class=10, random_state=Non
     xr.DataArray
         Stratified sample with max_samples_per_class from each category
     """
-    if random_state is not None:
-        np.random.seed(random_state)
+    # Local generator: same draws as seeding the global RNG, without resetting it for the caller
+    rng = np.random.RandomState(random_state) if random_state is not None else None
 
     # Get unique categories
     coord_values = da.coords[coord_name].values
 
     # Sample from each category
-    sampled_indices = sample_by_max_count(np.arange(len(coord_values)), coord_values, max_samples_per_class)
+    sampled_indices = sample_by_max_count(np.arange(len(coord_values)), coord_values, max_samples_per_class, rng=rng)
 
     if coord_name not in da.dims:
         dim_names = da.coords[coord_name].dims
@@ -157,7 +162,9 @@ def stratified_sample(da, coord_name, max_samples_per_class=10, random_state=Non
     return da.isel({dim_name: sampled_indices})
 
 
-def sample_by_max_count(indices: np.ndarray, labels: np.ndarray, max_samples: int) -> np.ndarray:
+def sample_by_max_count(
+    indices: np.ndarray, labels: np.ndarray, max_samples: int, rng: np.random.RandomState | None = None
+) -> np.ndarray:
     """Sample up to max_samples from each class."""
     sampled_indices = []
 
@@ -171,7 +178,7 @@ def sample_by_max_count(indices: np.ndarray, labels: np.ndarray, max_samples: in
         if n_samples < max_samples:
             warnings.warn(f"Class {class_label} has only {class_size} samples, requested {max_samples}")
 
-        sampled = np.random.choice(class_indices, size=n_samples, replace=False)
+        sampled = (rng or np.random).choice(class_indices, size=n_samples, replace=False)
         sampled_indices.append(sampled)
 
     return np.concatenate(sampled_indices)

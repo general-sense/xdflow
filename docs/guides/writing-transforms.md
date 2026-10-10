@@ -121,17 +121,17 @@ raise a clear error.
 
 ```python
 from xdflow.composite import Pipeline
-from xdflow.transforms.basic_transforms import FlattenTransform
+from xdflow.transforms.basic_transforms import RenameDimsTransform
 
 pipeline = Pipeline(
     name="features",
     steps=[
         ("ptp", PeakToPeakTransform(dim="time")),
-        ("flatten", FlattenTransform(dims=("channel",))),
+        ("rename", RenameDimsTransform(rename_map={"channel": "feature"})),
     ],
     expected_input_dims={
         "ptp": ("trial", "channel", "time"),
-        "flatten": ("trial", "channel"),
+        "rename": ("trial", "channel"),
     },
 )
 ```
@@ -150,11 +150,7 @@ import xarray as xr
 
 
 def make_output(data, values, output_dims):
-    coords = {
-        name: coord
-        for name, coord in data.coords.items()
-        if set(coord.dims).issubset(output_dims)
-    }
+    coords = {name: coord for name, coord in data.coords.items() if set(coord.dims).issubset(output_dims)}
     return xr.DataArray(values, dims=output_dims, coords=coords, attrs=data.attrs)
 ```
 

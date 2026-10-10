@@ -15,7 +15,9 @@ except ImportError:  # pragma: no cover - depends on optional extra
     lgb = None
 import numpy as np
 from sklearn.base import BaseEstimator
+from sklearn.base import clone as sklearn_clone
 from sklearn.model_selection import train_test_split
+from sklearn.multioutput import MultiOutputClassifier, MultiOutputRegressor
 from sklearn.preprocessing import LabelEncoder
 
 from xdflow.core.data_container import DataContainer
@@ -155,6 +157,7 @@ class LGBMPredictor(SKLearnPredictor):
 
         # Early stopping is enabled - need to create validation set
         data = container.data
+        self._record_fit_labels(data)
         X, sample_index = self._prepare_data(data)
 
         # Extract target values
@@ -163,9 +166,9 @@ class LGBMPredictor(SKLearnPredictor):
             # Resolve target coordinates (handles patterns, lists, and single coords)
             resolved_targets = self._resolve_target_coords(data)
 
-            # Store resolved targets for prediction
-            if not hasattr(self, "_resolved_target_coords"):
-                self._resolved_target_coords = resolved_targets
+            # Store resolved targets for prediction (every fit, so a changed target_coord is not left stale)
+            self._resolved_target_coords = resolved_targets
+            self._wrap_for_resolved_targets(resolved_targets)
 
             # Extract target values
             if len(resolved_targets) == 1:
@@ -248,6 +251,17 @@ class LGBMPredictor(SKLearnPredictor):
             callbacks.append(lgb.log_evaluation(period=period))
 
         fit_kwargs["callbacks"] = callbacks
+
+        if y_train.ndim == 2 and isinstance(self.estimator, (MultiOutputClassifier, MultiOutputRegressor)):
+            # MultiOutput* forwards fit kwargs unchanged, so every per-target model would be handed the 2D
+            # validation labels; fit each target's model with its own validation column instead.
+            estimators = []
+            for k in range(y_train.shape[1]):
+                target_kwargs = {**fit_kwargs, "eval_set": [(X_valid, y_valid[:, k])]}
+                estimators.append(sklearn_clone(self.estimator.estimator).fit(X_train, y_train[:, k], **target_kwargs))
+            self.estimator.estimators_ = estimators
+            self.best_iteration_ = [getattr(est, "best_iteration_", None) for est in estimators]
+            return self
 
         # Fit the estimator
         self.estimator.fit(X_train, y_train, **fit_kwargs)

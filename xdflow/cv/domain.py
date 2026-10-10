@@ -331,13 +331,13 @@ class SampledDomainKFoldValidator(CrossValidator):
 
         self.holdout_container_ = scoring_container
         self.holdout_pred_labels_ = pred_labels
+        self.holdout_class_labels_ = self._snapshot_class_labels()
         self.holdout_probabilities_ = scoring_values if needs_proba else holdout_probabilities
         self.holdout_true_labels_ = true_labels
         self.holdout_scoring_mask_ = None
 
-        if self._scoring_accepts_container:
-            self.holdout_score_ = scoring_func(self.holdout_true_labels_, scoring_values, scoring_container)
-        else:
-            self.holdout_score_ = scoring_func(self.holdout_true_labels_, scoring_values)
+        self.holdout_score_ = self._call_scoring_func(
+            scoring_func, self.holdout_true_labels_, scoring_values, scoring_container
+        )
 
         return self.holdout_score_

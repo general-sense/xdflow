@@ -197,3 +197,20 @@ def test_regressor_cannot_accept_encoder():
             target_coord="target",
             encoder=LabelEncoder(),
         )
+
+
+def test_clone_does_not_share_a_fitted_encoder():
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import LabelEncoder
+
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    encoder = LabelEncoder().fit(["a", "b"])
+    predictor = SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="y", encoder=encoder)
+    clone = predictor.clone()
+
+    assert clone.encoder is not predictor.encoder
+    np.testing.assert_array_equal(clone.encoder.classes_, ["a", "b"])
+    predictor.encoder.fit(["c", "d"])
+    np.testing.assert_array_equal(clone.encoder.classes_, ["a", "b"])

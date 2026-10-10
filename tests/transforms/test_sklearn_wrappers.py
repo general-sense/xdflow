@@ -1,6 +1,7 @@
 """Tests for SKLearn wrapper transforms."""
 
 import numpy as np
+import pytest
 import xarray as xr
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression, Ridge
@@ -254,3 +255,40 @@ class TestSKLearnRegression:
         assert result.data.dims == ("trial", "target")
         assert set(result.data.coords["target"].values) == {"target_x", "target_y"}
         assert predictor.is_multi_target
+
+
+def test_fitted_estimators_see_features_by_label_not_position():
+    from sklearn.linear_model import LogisticRegression
+
+    from xdflow.composite import Pipeline
+    from xdflow.transforms.basic_transforms import FlattenTransform
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    rng = np.random.default_rng(0)
+    labels = np.array(["a", "b"] * 30)
+    values = rng.normal(size=(60, 4, 5))
+    values[labels == "b", 0] += 1.0
+    data = DataContainer(
+        xr.DataArray(
+            values,
+            dims=("trial", "channel", "time"),
+            coords={
+                "trial": np.arange(60),
+                "channel": ["c0", "c1", "c2", "c3"],
+                "time": np.arange(5),
+                "y": ("trial", labels),
+            },
+        )
+    )
+    pipeline = Pipeline(
+        "flat_lr",
+        [
+            ("flatten", FlattenTransform(dims=("channel", "time"))),
+            ("clf", SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="y", proba=True)),
+        ],
+    ).fit(data)
+
+    reordered = DataContainer(data.data.isel(channel=[3, 1, 0, 2]))
+    np.testing.assert_allclose(pipeline.predict_proba(reordered).data.values, pipeline.predict_proba(data).data.values)
+    with pytest.raises(Exception, match="missing"):
+        pipeline.predict(DataContainer(data.data.isel(channel=[0, 1, 2])))
