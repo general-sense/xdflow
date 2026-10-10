@@ -4750,6 +4750,7 @@ docs = [
     { name = "mkdocstrings", extra = ["python"] },
     { name = "netcdf4" },
     { name = "optuna" },
+    { name = "pymdown-extensions" },
 ]
 lightgbm = [
     { name = "lightgbm" },
@@ -4806,6 +4807,7 @@ requires-dist = [
     { name = "plotly", marker = "extra == 'all'", specifier = ">=5.14.0" },
     { name = "plotly", marker = "extra == 'viz'", specifier = ">=5.14.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.0.0" },
+    { name = "pymdown-extensions", marker = "extra == 'docs'", specifier = "<12.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16" },
