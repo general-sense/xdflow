@@ -55,7 +55,8 @@ def _subclasses(cls: type) -> set[type]:
 
 _import_transform_modules()
 
-_NOT_CONCRETE = {"AdaptiveTransform"}  # a base class: each concrete aligner supplies its _STRATEGY_MAP
+# Base classes: each concrete aligner supplies its _STRATEGY_MAP; each @step function its own subclass
+_NOT_CONCRETE = {"AdaptiveTransform", "_FunctionStep"}
 CLASSES = sorted(
     (
         c
