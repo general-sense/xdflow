@@ -35,8 +35,9 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from xdflow import step
 from xdflow.composite import Pipeline
-from xdflow.core import DataContainer, Transform
+from xdflow.core import DataContainer
 from xdflow.cv import KFoldValidator, LeaveGroupOutValidator
 from xdflow.transforms.basic_transforms import FlattenTransform
 from xdflow.transforms.sklearn_transform import SKLearnPredictor, SKLearnTransformer
@@ -113,7 +114,7 @@ def load_har(archive: Path) -> xr.DataArray:
     return data.assign_coords(trial=np.arange(data.sizes["trial"]), segment=("trial", np.cumsum(new_segment)))
 
 
-# --- 2. Features: one NumPy function, wrapped in a small stateless transform -----------------------
+# --- 2. Features: one NumPy function, used as a pipeline step with @step ---------------------------
 def window_features(x: np.ndarray, fs: float) -> np.ndarray:
     """Summary statistics and log band power over the last axis (time); returns (..., len(FEATURES))."""
     power = np.abs(np.fft.rfft(x - x.mean(axis=-1, keepdims=True), axis=-1)) ** 2
@@ -123,29 +124,16 @@ def window_features(x: np.ndarray, fs: float) -> np.ndarray:
     return np.stack(stats + [np.log(p + 1e-10) for p in band_power], axis=-1)
 
 
-class WindowFeaturesTransform(Transform):
-    """Per-channel window features. Nothing is learned from the data, so it is declared stateless."""
-
-    is_stateful = False
-    input_dims = ("trial", "channel", "time")
-    output_dims = ("trial", "channel", "feature")
-
-    def __init__(self, fs: float):
-        super().__init__()
-        self.fs = fs
-
-    def _transform(self, container: DataContainer, **kwargs) -> DataContainer:
-        data = container.data.transpose("trial", "channel", "time")
-        if not np.allclose(np.diff(data["time"].values), 1 / self.fs):
-            raise ValueError(f"The time coordinate is not sampled at fs={self.fs} Hz.")
-        trial_coords = {name: coord for name, coord in data.coords.items() if coord.dims == ("trial",)}
-        features = xr.DataArray(
-            window_features(data.values, self.fs),
-            dims=("trial", "channel", "feature"),
-            coords={**trial_coords, "channel": data["channel"].values, "feature": FEATURES},
-            attrs=data.attrs,
-        )
-        return DataContainer(features)
+@step
+def features(data: xr.DataArray, fs: float = FS) -> xr.DataArray:
+    """Per-channel window features. Each window's features depend on that window only, so cross-validation
+    computes them once for all folds."""
+    if not np.allclose(np.diff(data["time"].values), 1 / fs):
+        raise ValueError(f"The time coordinate is not sampled at fs={fs} Hz.")
+    # apply_ufunc replaces the time dim with a feature dim and keeps every trial and channel coordinate.
+    return xr.apply_ufunc(
+        window_features, data, input_core_dims=[["time"]], output_core_dims=[["feature"]], kwargs={"fs": fs}
+    ).assign_coords(feature=FEATURES)
 
 
 # --- 3. xdflow: one pipeline; the validator's group_coord sets the split boundary -------------------
@@ -153,7 +141,7 @@ def build_pipeline() -> Pipeline:
     return Pipeline(
         name="har",
         steps=[
-            ("features", WindowFeaturesTransform(fs=FS)),  # stateless: computed once, before the folds
+            ("features", features(fs=FS)),  # stateless: computed once, before the folds
             ("flatten", FlattenTransform(dims=("channel", "feature"))),
             ("scale", SKLearnTransformer(StandardScaler, sample_dim="trial")),  # stateful: refit per fold
             (

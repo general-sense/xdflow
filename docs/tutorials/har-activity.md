@@ -79,42 +79,25 @@ def window_features(x: np.ndarray, fs: float) -> np.ndarray:
     return np.stack(stats + [np.log(p + 1e-10) for p in band_power], axis=-1)
 ```
 
-In xdflow, the function is wrapped in a small transform that follows [Writing Custom Transforms](../guides/writing-transforms.md):
-
-- It declares its input and output dimensions.
-- It declares `is_stateful = False`, because nothing is learned from the data.
-- It checks the sampling rate against the `time` coordinate.
-- It keeps the trial-level coordinates on its output.
+In xdflow, the same function becomes a pipeline step with `@step`. `xr.apply_ufunc` swaps the `time` dimension for a `feature` dimension and keeps every trial and channel coordinate. The step also checks the sampling rate against the `time` coordinate:
 
 ```python
-class WindowFeaturesTransform(Transform):
-    is_stateful = False
-    input_dims = ("trial", "channel", "time")
-    output_dims = ("trial", "channel", "feature")
-
-    def __init__(self, fs: float):
-        super().__init__()
-        self.fs = fs
-
-    def _transform(self, container, **kwargs):
-        data = container.data.transpose("trial", "channel", "time")
-        if not np.allclose(np.diff(data["time"].values), 1 / self.fs):
-            raise ValueError(f"The time coordinate is not sampled at fs={self.fs} Hz.")
-        trial_coords = {name: coord for name, coord in data.coords.items() if coord.dims == ("trial",)}
-        features = xr.DataArray(
-            window_features(data.values, self.fs),
-            dims=("trial", "channel", "feature"),
-            coords={**trial_coords, "channel": data["channel"].values, "feature": FEATURES},
-            attrs=data.attrs,
-        )
-        return DataContainer(features)
+@step
+def features(data: xr.DataArray, fs: float = 50) -> xr.DataArray:
+    """Per-channel window features. Each window's features depend on that window only, so cross-validation
+    computes them once for all folds."""
+    if not np.allclose(np.diff(data["time"].values), 1 / fs):
+        raise ValueError(f"The time coordinate is not sampled at fs={fs} Hz.")
+    return xr.apply_ufunc(
+        window_features, data, input_core_dims=[["time"]], output_core_dims=[["feature"]], kwargs={"fs": fs}
+    ).assign_coords(feature=FEATURES)
 
 
 def build_pipeline() -> Pipeline:
     return Pipeline(
         name="har",
         steps=[
-            ("features", WindowFeaturesTransform(fs=50)),  # stateless: computed once, before the folds
+            ("features", features(fs=50)),  # stateless: computed once, before the folds
             ("flatten", FlattenTransform(dims=("channel", "feature"))),
             ("scale", SKLearnTransformer(StandardScaler, sample_dim="trial")),  # stateful: refit per fold
             (
@@ -259,6 +242,6 @@ walking_upstairs       0.0      0.0       0.0      3.4                 7.3      
 ## Next steps
 
 - [EEG Motor Imagery: xdflow vs. sklearn](eeg-motor-imagery.md) applies the same comparison to EEG, where the pitfall is fitting a supervised step before the split.
-- [Writing Custom Transforms](../guides/writing-transforms.md) covers the contract `WindowFeaturesTransform` follows.
+- [Writing Custom Transforms](../guides/writing-transforms.md) covers `@step`, including steps that learn from training data.
 - [Execution Model](../concepts/execution.md) describes the stateless/stateful split boundary.
 - [Hyperparameter Tuning](tuning.md) shows how to choose features or models inside the validation loop instead of by hand.

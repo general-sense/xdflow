@@ -6,9 +6,60 @@ Transforms are the basic extension point in XDFlow. A transform takes a
 
 Write a custom transform when the operation belongs inside a reusable pipeline:
 preprocessing, feature extraction, denoising, reshaping, metadata annotation, or
-a model adapter. Prefer existing transforms first, especially `FunctionTransform`
-for simple array functions and `SKLearnTransformer` or `SKLearnPredictor` for
-sklearn-compatible estimators.
+a model adapter. Prefer existing transforms first, `SKLearnTransformer` or
+`SKLearnPredictor` for sklearn-compatible estimators, and a plain function with
+`@step` for your own computations. Subclass `Transform` when you need full control.
+
+## Functions as Steps
+
+Decorate a function of an `xarray.DataArray` with `@step`. Its other parameters
+become the step's hyperparameters, so it clones, caches and tunes like any
+built-in transform:
+
+```python
+import numpy as np
+import xarray as xr
+
+from xdflow import make_pipeline, step
+
+
+@step
+def log_band_power(data: xr.DataArray, band=(8.0, 30.0)) -> xr.DataArray:
+    """Mean log power in a frequency band, per trial and channel."""
+    return np.log((data.sel(freq=slice(*band)) ** 2).mean("freq"))
+
+
+pipeline = make_pipeline(log_band_power(band=(8.0, 12.0)), ...)  # the step is named "log_band_power"
+pipeline.set_params(log_band_power__band=(13.0, 30.0))  # tuners use the same path
+```
+
+- The function receives the data and returns an `xr.DataArray`, or a NumPy array
+  with the same shape as its input (it gets the input's dims and coords).
+- The input is a read-only view, so an in-place edit such as `data *= 2` raises
+  instead of changing the caller's data.
+- A step without `fit` must compute each trial from that trial alone. Cross-validation
+  relies on this to compute it once for all folds, and every call runs a quick check,
+  rerunning the function on three trials alone. A function that uses other trials,
+  such as `data - data.mean("trial")`, raises and points you to `fit`.
+
+Steps that learn from the training data take a `fit` function. It returns any state,
+which the step function receives as `state`. Cross-validation calls `fit` on each
+training fold only:
+
+```python
+def channel_means(data):
+    return data.mean(("trial", "time"))
+
+
+@step(fit=channel_means)
+def recenter(data, state):
+    return data - state
+```
+
+`fit` receives the hyperparameters it names, all declared on the step function. Pass
+`output_dims=(...)` to `@step` to take part in pipeline dimension checks. Define step
+functions at module level (or at the top of a notebook) so fitted pipelines can be
+pickled and cached.
 
 ## The Transform Contract
 
