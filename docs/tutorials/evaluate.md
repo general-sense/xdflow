@@ -53,7 +53,9 @@ are either per-sample arrays or names of trial coordinates:
   `(train, test)` index pairs, or an xdflow validator for holdouts and custom policies.
 
 With the same split, `evaluate` gives the same fold scores as scikit-learn's `cross_val_score`. An int `cv`
-shuffles trials (seeded by `random_state`), unlike scikit-learn's.
+shuffles trials (seeded by `random_state`), unlike scikit-learn's. Classifiers are fit on class labels encoded
+as 0, 1, 2... in sorted order, so estimator parameters that name a class (a `class_weight` dict,
+`DummyClassifier(constant=...)`) must use those codes; `class_weight="balanced"` needs no change.
 
 ### Metrics
 
@@ -61,11 +63,13 @@ shuffles trials (seeded by `random_state`), unlike scikit-learn's.
 `"balanced_accuracy"`, `"f1_macro"`, `"r2"`, `"neg_mean_absolute_error"`...), scorers from `make_scorer`, or a
 function `(y_true, y_pred) -> float`. The default is accuracy for classifiers and R² for regressors. Metrics
 computed from probabilities (`"roc_auc"`, `"neg_log_loss"`) need a validator passed as `cv` (below). An xdflow
-validator passed as `cv` keeps its own `scoring` and groups (its default metric is weighted F1).
+validator passed as `cv` keeps its own `scoring` and groups (by default weighted F1 for classifiers and R² for
+regressors).
 
 ## Reading the result
 
-- `result.score` and `result.fold_scores`: the mean over folds, and each fold's score.
+- `result.score` and `result.fold_scores`: the mean over folds, and each fold's score (a validator passed as
+  `cv` may blend in its pooled score; see `pooling_score_weight`).
 - `result.by("subject")`: score and trial count per subject, or per session, condition or any trial coordinate.
   Groups given as an array are named `"group"`, and a target given as an array `"y"`.
 - `result.predictions`: one row per trial with its coordinates, `y_true`, `y_pred` and `fold`.
@@ -94,22 +98,25 @@ Your own preprocessing can be a plain function with `@xdflow.step`; see
 
 ## Tuning the model you evaluated
 
-`result.pipeline` is an xdflow pipeline named `"model"`. Its steps are named after their class or function
-(`"bandpassfilter"`, `"log_power"`), and a scikit-learn model after its class (`"logisticregression"`, or
-`"pipeline"` for a scikit-learn `Pipeline`, whose own steps follow: `"pipeline__csp__n_components"`). Print it
-to see the names. The [Tuner](tuning.md) takes them grouped by pipeline and step, with the split as a
-validator; `SplitterValidator` takes the same splitter `evaluate` would use:
+For a scikit-learn model or a list of steps, `result.pipeline` is an xdflow pipeline named `"model"` (an xdflow
+pipeline you pass keeps its name). Its steps are named after their class or function (`"bandpassfilter"`,
+`"log_power"`), and a scikit-learn model after its class (`"logisticregression"`, or `"pipeline"` for a
+scikit-learn `Pipeline`, whose own steps follow: `"pipeline__csp__n_components"`). Print it to see the names.
+The [Tuner](tuning.md) takes them grouped by pipeline and step, with the split as a validator, and data that
+holds the target and groups as trial coordinates:
 
 ```python
 from sklearn.model_selection import GroupKFold
 
-from xdflow import DataContainer, SplitterValidator, Tuner
+from xdflow import SplitterValidator, Tuner
 
+data = xdflow.from_numpy(X, y=y, subject=subject_ids)  # target and groups as named trial coordinates
+result = xdflow.evaluate(model, data, "y", groups="subject")
 tuner = Tuner(
     pipelines_to_tune=result.pipeline,
     cv_strategy=SplitterValidator(GroupKFold(5), group_coord="subject", scoring="accuracy", verbose=False),
     param_grid={"model": {"pipeline": {"logisticregression__C": ("log", 1e-3, 10.0)}}},
-    initial_data_container=DataContainer(data),  # the data passed to evaluate, as a DataArray
+    initial_data_container=data,
 )
 tuner.tune(n_trials=20)
 ```
