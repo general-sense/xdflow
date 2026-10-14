@@ -30,8 +30,9 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Fitted classifiers predict on data without a label coordinate (new, unlabeled recordings).
-- Cross-validation no longer fails when a fold pipeline cannot be pickled for the fit cache (for example a
-  lambda after the first stateful step); that fold runs uncached, with a warning.
+- Cross-validation and `Pipeline(use_cache=True)` no longer fail when a fold pipeline or a cached result cannot
+  be pickled (for example a lambda step); that part runs uncached, with a warning.
+- The Tuner no longer prints its pipeline template on every trial.
 
 ## [0.3.0] - 2026-10-10
 

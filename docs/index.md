@@ -59,9 +59,9 @@ XDFlow currently operates on in-memory `xarray.DataArray` inputs. Out-of-core an
 4. Run the [5-Minute Core Quickstart](tutorials/quickstart.md) for a base-install example.
 5. Read [Execution Model](concepts/execution.md) for the split, refit, and caching rules.
 6. Use [Hyperparameter Tuning](tutorials/tuning.md) to search over pipeline parameters and architecture choices.
-6. Follow the [Spectral Pipeline Walkthrough](tutorials/basic-pipeline.md) for an end-to-end signal-processing example.
-7. Read [Reusable ML Patterns](tutorials/reusable-ml-patterns.md) for multilabel, weighting, and domain-transfer examples.
-8. Use [Writing Custom Transforms](guides/writing-transforms.md) when adding reusable preprocessing or feature extraction.
-9. Use [Writing Custom Cross-Validators](guides/writing-cross-validators.md) only when built-in split policies do not fit.
-10. Use [XDFlow With LLMs](guides/llm.md) when asking an LLM to implement against the framework.
-11. Use the [API Reference](api/index.md) for class and function details.
+7. Follow the [Spectral Pipeline Walkthrough](tutorials/basic-pipeline.md) for an end-to-end signal-processing example.
+8. Read [Reusable ML Patterns](tutorials/reusable-ml-patterns.md) for multilabel, weighting, and domain-transfer examples.
+9. Use [Writing Custom Transforms](guides/writing-transforms.md) when adding reusable preprocessing or feature extraction.
+10. Use [Writing Custom Cross-Validators](guides/writing-cross-validators.md) only when built-in split policies do not fit.
+11. Use [XDFlow With LLMs](guides/llm.md) when asking an LLM to implement against the framework.
+12. Use the [API Reference](api/index.md) for class and function details.

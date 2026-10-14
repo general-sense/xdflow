@@ -49,8 +49,9 @@ group
 ```
 
 (Activity recognition from smartphone sensors, 30 people; [walkthrough](docs/tutorials/har-activity.md).)
-`result.predictions` holds every out-of-fold prediction with its trial metadata, `result.by("session")` breaks
-the score down by any coordinate, and `result.fit_final()` refits on all the data for new predictions.
+`result.predictions` holds every out-of-fold prediction with its trial metadata, `result.by(...)` breaks the
+score down by any coordinate (`"group"` for groups given as an array, or any `metadata=` column), and
+`result.fit_final()` refits on all the data for new predictions.
 
 Check a split you already use, without running a model:
 
@@ -221,7 +222,7 @@ result = xdflow.evaluate(
 ```
 
 Multi-dimensional input such as `trial × channel × time` is passed straight through, and its parameters stay
-tunable by their usual names (`csp__n_components`). In the other direction, `xdflow.to_sklearn(pipeline, ...)`
+tunable under the step's name (`pipeline__csp__n_components` on `result.pipeline`). In the other direction, `xdflow.to_sklearn(pipeline, ...)`
 makes any xdflow pipeline a scikit-learn estimator for `cross_val_score`, `GridSearchCV` or MOABB.
 
 ## Try it

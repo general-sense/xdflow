@@ -19,8 +19,9 @@ built-in transform:
 ```python
 import numpy as np
 import xarray as xr
+from sklearn.linear_model import LogisticRegression
 
-from xdflow import make_pipeline, step
+from xdflow import SKLearnPredictor, make_pipeline, step
 
 
 @step
@@ -29,7 +30,8 @@ def log_band_power(data: xr.DataArray, band=(8.0, 30.0)) -> xr.DataArray:
     return np.log((data.sel(freq=slice(*band)) ** 2).mean("freq"))
 
 
-pipeline = make_pipeline(log_band_power(band=(8.0, 12.0)), ...)  # the step is named "log_band_power"
+classifier = SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label")
+pipeline = make_pipeline(log_band_power(band=(8.0, 12.0)), classifier)  # the step is named "log_band_power"
 pipeline.set_params(log_band_power__band=(13.0, 30.0))  # tuners use the same path
 ```
 
@@ -40,7 +42,10 @@ pipeline.set_params(log_band_power__band=(13.0, 30.0))  # tuners use the same pa
 - A step without `fit` must compute each trial from that trial alone. Cross-validation
   relies on this to compute it once for all folds, and every call runs a quick check,
   rerunning the function on three trials alone. A function that uses other trials,
-  such as `data - data.mean("trial")`, raises and points you to `fit`.
+  such as `data - data.mean("trial")`, raises and points you to `fit`. The check
+  samples trials, so it catches most cross-trial computations, not all of them.
+- Do not read the target coordinate (e.g. `data["label"]`) in a step: it is present
+  during cross-validation, and the check cannot tell that the output uses it.
 
 Steps that learn from the training data take a `fit` function. It returns any state,
 which the step function receives as `state`. Cross-validation calls `fit` on each

@@ -44,28 +44,35 @@ are either per-sample arrays or names of trial coordinates:
 
 - **`groups`** keeps every trial of a group (subject, session, recording) on one side of each split, so the
   score is for new groups. With no more groups than folds, each group is held out in turn; otherwise groups are
-  split into `cv` folds, stratified by class.
+  split into `cv` folds, stratified by class. A splitter passed as `cv` is used as is, as in scikit-learn
+  (`groups` reach group splitters such as `GroupKFold`); `evaluate` warns if it puts a group on both sides.
 - **Without `groups`**, folds are stratified by class and trials are shuffled. If the data has a subject,
   session or similar coordinate, `evaluate` warns that the score is for new trials from known subjects, and
   names the `groups=` that would score new subjects instead.
 - **`cv`** also accepts any scikit-learn splitter (`GroupKFold(5)`, `TimeSeriesSplit(4)`...), explicit
   `(train, test)` index pairs, or an xdflow validator for holdouts and custom policies.
 
-With the same split, `evaluate` gives the same fold scores as scikit-learn's `cross_val_score`.
+With the same split, `evaluate` gives the same fold scores as scikit-learn's `cross_val_score`. An int `cv`
+shuffles trials (seeded by `random_state`), unlike scikit-learn's.
 
 ### Metrics
 
 `scoring` takes scikit-learn's metric names with their scikit-learn meaning (`"accuracy"`,
-`"balanced_accuracy"`, `"f1_macro"`, `"r2"`, `"neg_mean_absolute_error"`...) or a function
-`(y_true, y_pred) -> float`. The default is accuracy for classifiers and R² for regressors.
+`"balanced_accuracy"`, `"f1_macro"`, `"r2"`, `"neg_mean_absolute_error"`...), scorers from `make_scorer`, or a
+function `(y_true, y_pred) -> float`. The default is accuracy for classifiers and R² for regressors. Metrics
+computed from probabilities (`"roc_auc"`, `"neg_log_loss"`) need a validator passed as `cv` (below). An xdflow
+validator passed as `cv` keeps its own `scoring` and groups (its default metric is weighted F1).
 
 ## Reading the result
 
 - `result.score` and `result.fold_scores`: the mean over folds, and each fold's score.
 - `result.by("subject")`: score and trial count per subject, or per session, condition or any trial coordinate.
+  Groups given as an array are named `"group"`, and a target given as an array `"y"`.
 - `result.predictions`: one row per trial with its coordinates, `y_true`, `y_pred` and `fold`.
 - `result.split`: what the folds share between training and test sets.
-- `result.fit_final()`: the pipeline refit on all trials; its `predict` needs no labels.
+- `result.fit_final()`: the pipeline refit on all trials; its `predict` needs no labels. It takes a
+  container, like every xdflow pipeline: `final.predict(xdflow.from_numpy(X_new)).data.values` for NumPy
+  arrays (with the same `dims` as in `evaluate`), `xdflow.from_mne_epochs(epochs)` for MNE `Epochs`.
 
 ## xdflow steps in front of your model
 
@@ -84,6 +91,31 @@ result = xdflow.evaluate(
 
 Your own preprocessing can be a plain function with `@xdflow.step`; see
 [Writing Custom Transforms](../guides/writing-transforms.md#functions-as-steps).
+
+## Tuning the model you evaluated
+
+`result.pipeline` is an xdflow pipeline named `"model"`. Its steps are named after their class or function
+(`"bandpassfilter"`, `"log_power"`), and a scikit-learn model after its class (`"logisticregression"`, or
+`"pipeline"` for a scikit-learn `Pipeline`, whose own steps follow: `"pipeline__csp__n_components"`). Print it
+to see the names. The [Tuner](tuning.md) takes them grouped by pipeline and step, with the split as a
+validator; `SplitterValidator` takes the same splitter `evaluate` would use:
+
+```python
+from sklearn.model_selection import GroupKFold
+
+from xdflow import DataContainer, SplitterValidator, Tuner
+
+tuner = Tuner(
+    pipelines_to_tune=result.pipeline,
+    cv_strategy=SplitterValidator(GroupKFold(5), group_coord="subject", scoring="accuracy", verbose=False),
+    param_grid={"model": {"pipeline": {"logisticregression__C": ("log", 1e-3, 10.0)}}},
+    initial_data_container=DataContainer(data),  # the data passed to evaluate, as a DataArray
+)
+tuner.tune(n_trials=20)
+```
+
+The best score is the one the search selected, so it is optimistic; score the chosen settings on held-out
+subjects (a validator with a holdout, or an outer split) before reporting it.
 
 ## Checking a split you already use
 
