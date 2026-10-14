@@ -189,7 +189,8 @@ def audit_splits(
     # Scopes come from every trial coordinate, including ones not audited (subject ids that never repeat).
     trial_coords = [str(name) for name, coord in data.coords.items() if coord.dims == ("trial",) and name != "trial"]
     subject_coord = next((name for name in [*coords, *trial_coords] if _grouping_kind(name) == "subject"), None)
-    session_coords = [name for name in trial_coords if _grouping_kind(name) == "recording"]
+    # Runs restart within sessions; other recording-level coordinates (day, site...) need not contain whole runs.
+    session_coords = [name for name in trial_coords if _grouping_kind(name) == "recording" and "sess" in name.lower()]
 
     for name in coords:
         values = np.asarray(data.coords[name].values)

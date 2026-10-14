@@ -341,7 +341,8 @@ def _as_validator(
     if isinstance(cv, CrossValidator):
         if groups_name is not None or scoring is not None:
             raise ValueError("groups and scoring come from the validator you passed; set them there instead.")
-        return copy.deepcopy(cv), type(cv).__name__  # a copy: reusing cv must not change this result
+        # A copy, so reusing cv cannot change this result; shallow, as cross_validate rebinds every result.
+        return copy.copy(cv), type(cv).__name__
 
     if scoring is None and isinstance(target, str):
         scoring = "accuracy" if is_classifier else "r2"

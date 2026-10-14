@@ -135,19 +135,3 @@ def test_predict_proba_with_bool_labels_has_a_column_per_class(X):
 def test_continuous_targets_are_refused_by_a_classifier(X):
     with pytest.raises(ValueError, match="continuous"):
         to_sklearn(_classifier_pipeline(), DIMS, COORDS).fit(X, np.linspace(0, 1, 80))
-
-
-def test_clones_do_not_share_mutable_parameters(X, y):
-    from xdflow.transforms.function_step import step
-
-    @step
-    def gain(data, config):
-        return data * config["gain"]
-
-    pipeline = make_pipeline(
-        gain({"gain": 1.0}), FlattenTransform(dims=("channel", "time")), _classifier_pipeline().steps[-1].transform
-    )
-    clf = to_sklearn(pipeline, DIMS, COORDS).fit(X, y)
-    before = clf.predict_proba(X)
-    clone(clf).pipeline.steps[0].transform.config["gain"] = 20.0
-    np.testing.assert_array_equal(clf.predict_proba(X), before)

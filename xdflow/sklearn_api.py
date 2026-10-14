@@ -1,6 +1,5 @@
 """Use an xdflow pipeline as a scikit-learn estimator (``cross_val_score``, ``GridSearchCV``, MOABB...)."""
 
-import copy
 from typing import Any
 
 import numpy as np
@@ -25,9 +24,8 @@ class _PipelineEstimator(BaseEstimator):
 
     def __sklearn_clone__(self) -> "_PipelineEstimator":
         # xdflow pipelines clone themselves (fresh, unfitted, current hyperparameters); sklearn's generic
-        # clone would try to rebuild them from get_params(). Deep-copied, as scikit-learn copies parameters, so
-        # editing a clone's mutable parameters (a dict) cannot change this estimator.
-        return type(self)(pipeline=copy.deepcopy(self.pipeline.clone()), dims=self.dims, coords=self.coords)
+        # clone would try to rebuild them from get_params().
+        return type(self)(pipeline=self.pipeline.clone(), dims=self.dims, coords=self.coords)
 
     def _target(self) -> str:
         target = self.pipeline.final_target_coord

@@ -161,3 +161,9 @@ def test_duplicates_are_found_in_object_arrays():
 def test_a_stratified_split_without_y_explains(X):
     with pytest.raises(ValueError, match="y="):
         check_split(X, StratifiedKFold(3))
+
+
+def test_runs_are_not_scoped_by_other_recording_coordinates():
+    info = pd.DataFrame({"session": 1, "run": 1, "day": [1, 1, 2, 2]})  # one run spanning midnight
+    report = check_split(np.arange(4.0)[:, None], [([0, 1], [2, 3])], metadata=info)
+    assert "run" in report.shared_coords

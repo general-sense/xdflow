@@ -323,3 +323,12 @@ def test_statistics_over_trials_in_other_coordinates_are_rejected(container):
 
     with pytest.raises(ValueError, match="depending on which other trials"):
         attach_channel_means().transform(container)
+
+
+def test_unlabeled_data_reaches_the_rerun_unlabeled(container):
+    @step
+    def rebuilt(data):
+        return xr.DataArray(data.values * 2, dims=data.dims)  # drops every coordinate
+
+    unlabeled = DataContainer(container.data.drop_vars("trial"))
+    np.testing.assert_allclose(rebuilt().transform(unlabeled).data.values, container.data.values * 2)

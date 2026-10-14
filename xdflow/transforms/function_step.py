@@ -256,27 +256,30 @@ class _FunctionStep(Transform):
         )
         if "trial" not in result.dims:
             raise ValueError(f"{name}() returned no 'trial' dim, so its output is not computed per trial. {hint}")
-        if "trial" not in data.indexes:  # no trial labels: match trials by position
+        unlabeled = "trial" not in data.indexes  # no trial labels: trials are matched by position
+        if unlabeled:
             if "trial" in result.indexes or result.sizes["trial"] != data.sizes["trial"]:
                 raise ValueError(
                     f"{name}() changed the trials of data without a 'trial' coordinate, so they cannot be checked; "
                     f"label the trials (data.assign_coords(trial=...)). {hint}"
                 )
-            positions = np.arange(data.sizes["trial"])
-            data, result = data.assign_coords(trial=positions), result.assign_coords(trial=positions)
-        if not (data.indexes["trial"].is_unique and pd.Index(result.trial.values).is_unique):
+            result = result.assign_coords(trial=np.arange(data.sizes["trial"]))
+        trials = np.arange(data.sizes["trial"]) if unlabeled else data.trial.values
+        if not (pd.Index(trials).is_unique and pd.Index(result.trial.values).is_unique):
             raise ValueError(f"Trial labels must be unique to check {name}(); relabel the trials. {hint}")
-        kept = data.trial.values[pd.Index(result.trial.values).get_indexer(data.trial.values) >= 0]
+        kept = trials[pd.Index(result.trial.values).get_indexer(trials) >= 0]
         if kept.size == 0:
             raise ValueError(f"{name}() returned none of its input trials, so they cannot be checked. {hint}")
         # Interior trials: on ordered data the first and last trials hold the extremes, which a global min/max
         # normalisation would reproduce on any subset containing them.
         labels = list(dict.fromkeys([kept[kept.size // 4], kept[kept.size // 2], kept[(3 * kept.size) // 4]]))
-        subset = data.sel(trial=labels)
+        subset = data.isel(trial=labels) if unlabeled else data.sel(trial=labels)  # unlabeled, as in the first call
         try:
             alone = self._as_output(self._call(self.func, subset, params), subset)
         except Exception as exc:
             raise ValueError(f"Could not run {name}() on 3 trials alone ({exc}). {hint}") from exc
+        if unlabeled and "trial" not in alone.indexes and alone.sizes.get("trial") == len(labels):
+            alone = alone.assign_coords(trial=labels)
         if "trial" not in alone.dims or not set(labels) <= set(alone.trial.values):
             raise ValueError(f"{name}() keeps different trials when run on 3 trials alone. {hint}")
         alone, together = alone.sel(trial=labels), result.sel(trial=labels)
