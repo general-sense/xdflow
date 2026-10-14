@@ -37,8 +37,8 @@ def info():
         ("participant", "subject"),
         ("mouse_ids", "subject"),
         ("session", "recording"),
-        ("run", "recording"),
-        ("block_nr", "recording"),
+        ("run", "run"),
+        ("block_nr", "run"),
         ("days", "recording"),
         ("orig_trial", "source"),
         ("participant_code", "subject"),
@@ -121,3 +121,43 @@ def test_a_single_subject_is_reported_as_shared(X, y):
     report = check_split(X, GroupKFold(2), y=y, groups="session", metadata=info)
     assert report.shared_coords == ["subject"]
     assert report.table.set_index("check").loc["session (within subject)", "folds shared"] == "0/2"
+
+
+def test_runs_are_scoped_by_session(X, y):
+    # MOABB-style: run ids restart in every session; holding out a session shares no run.
+    info = pd.DataFrame(
+        {"subject": 1, "session": np.repeat(["0train", "1test"], 30), "run": np.tile(np.repeat([0, 1, 2], 10), 2)}
+    )
+    report = check_split(X, GroupKFold(2), y=y, groups="session", metadata=info)
+    assert report.shared_coords == ["subject"]
+    assert report.table.set_index("check").loc["run (within subject, session)", "folds shared"] == "0/2"
+
+
+def test_sessions_are_scoped_by_subject_ids_that_never_repeat():
+    info = pd.DataFrame({"subject": ["a", "b"], "session": [1, 1]})
+    assert check_split(np.array([[0.0], [1.0]]), [([0], [1])], metadata=info).ok
+
+
+def test_a_validators_group_coordinate_is_audited(X, y):
+    from sklearn.model_selection import KFold
+
+    from xdflow.cv import SplitterValidator
+
+    data = from_numpy(X, ("trial", "feature"), label=y, device=np.arange(60) % 3)
+    validator = SplitterValidator(KFold(2), group_coord="device", verbose=False)
+    validator.set_pipeline(
+        Pipeline("p", [("lr", SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label"))])
+    )
+    validator.cross_validate(data)
+    assert check_split(data, validator).shared_coords == ["device"]
+
+
+def test_duplicates_are_found_in_object_arrays():
+    samples = np.empty((2, 1), dtype=object)
+    samples[0, 0], samples[1, 0] = float("1.5"), float("1.0") + 0.5  # equal values, distinct objects
+    assert not check_split(samples, [([0], [1])]).ok
+
+
+def test_a_stratified_split_without_y_explains(X):
+    with pytest.raises(ValueError, match="y="):
+        check_split(X, StratifiedKFold(3))

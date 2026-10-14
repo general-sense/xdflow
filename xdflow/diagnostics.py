@@ -18,7 +18,8 @@ from xdflow.interop import _as_container
 
 # Coordinate names recognised as units that should not be split between training and test sets.
 _SUBJECT_WORDS = {"subject", "subj", "participant", "patient", "animal", "mouse", "rat", "monkey", "individual"}
-_RECORDING_WORDS = {"session", "sess", "run", "recording", "segment", "day", "block", "visit", "site"}
+_RECORDING_WORDS = {"session", "sess", "day", "visit", "site"}
+_RUN_WORDS = {"run", "recording", "segment", "block"}  # parts of a session
 _SOURCE_NAMES = {"orig_trial", "original_trial", "source_trial", "parent_trial", "epoch_source", "window_source"}
 _ID_SUFFIXES = {"id", "ids", "nr", "no", "num", "number", "idx", "index", "code", "name", "label", "key"}
 
@@ -39,13 +40,14 @@ def grouping_coords(data: xr.DataArray, min_values: int = 1) -> list[str]:
         n_values = len(pd.unique(np.asarray(coord.values).ravel()))
         if min_values <= n_values < data.sizes["trial"]:
             found.append(name)
-    order = {"subject": 0, "recording": 1, "source": 2}
+    order = {"subject": 0, "recording": 1, "run": 2, "source": 3}
     return sorted(found, key=lambda name: order[_grouping_kind(name) or "source"])
 
 
 def _grouping_kind(name: str) -> str | None:
-    """ "subject", "recording" or "source" for identity-style names (``subject``, ``SubjectID``, ``mouse_ids``,
-    ``block_nr``, ``recording_session``), None otherwise, including attributes such as ``subject_age``."""
+    """ "subject", "recording" (sessions), "run" (parts of a session) or "source" for identity-style names
+    (``subject``, ``SubjectID``, ``mouse_ids``, ``block_nr``, ``recording_session``), None otherwise, including
+    attributes such as ``subject_age``."""
     tokens = [token for token in re.split(r"[^a-z0-9]+", name.lower()) if token]
     if len(tokens) > 1 and tokens[-1] in _ID_SUFFIXES:
         tokens = tokens[:-1]
@@ -59,6 +61,8 @@ def _grouping_kind(name: str) -> str | None:
             return "subject"
         if candidate in _RECORDING_WORDS:
             return "recording"
+        if candidate in _RUN_WORDS:
+            return "run"
     return None
 
 
@@ -146,18 +150,25 @@ def check_split(
         if not cv.split_trials_:
             raise ValueError("This validator has not run yet; call cross_validate() first, or pass a splitter.")
         split_trials = cv.split_trials_
+        groups_name = getattr(cv, "group_coord", None)
     else:
         y_values = data.coords[y_name].values if y_name else None
         group_values = data.coords[groups_name].values if groups_name else None
         is_classification = y_values is not None and type_of_target(y_values) in ("binary", "multiclass")
         splitter = check_cv(cv, y_values, classifier=is_classification)  # also wraps (train, test) index pairs
+        try:
+            splits = list(splitter.split(np.zeros((trials.size, 1)), y_values, group_values))
+        except (TypeError, ValueError) as exc:
+            if y_values is None and "groups" not in str(exc):
+                raise ValueError(f"{type(splitter).__name__} failed without a target ({exc}); pass y=.") from exc
+            raise
         split_trials = []
-        for train_pos, test_pos in splitter.split(np.zeros((trials.size, 1)), y_values, group_values):
+        for train_pos, test_pos in splits:
             train_pos, test_pos = _check_positions(train_pos, trials.size), _check_positions(test_pos, trials.size)
             split_trials.append((trials[train_pos], trials[test_pos]))
 
     audited = grouping_coords(data)
-    if groups_name and groups_name not in audited:
+    if groups_name and groups_name in data.coords and groups_name not in audited:
         audited.append(groups_name)
     samples = data.transpose("trial", ...).values.reshape(trials.size, -1)
     return audit_splits(data, split_trials, audited, samples=samples)
@@ -175,15 +186,21 @@ def audit_splits(
         if (trial_position.get_indexer(np.concatenate([train_trials, test_trials])) < 0).any():
             raise ValueError("The splits refer to trials that are not in the data; audit the data that was split.")
     rows, findings, shared_coords = [], [], []
-    subject_coord = next((name for name in coords if _grouping_kind(name) == "subject"), None)
+    # Scopes come from every trial coordinate, including ones not audited (subject ids that never repeat).
+    trial_coords = [str(name) for name, coord in data.coords.items() if coord.dims == ("trial",) and name != "trial"]
+    subject_coord = next((name for name in [*coords, *trial_coords] if _grouping_kind(name) == "subject"), None)
+    session_coords = [name for name in trial_coords if _grouping_kind(name) == "recording"]
 
     for name in coords:
         values = np.asarray(data.coords[name].values)
         kind = _grouping_kind(name)
-        scoped = kind == "recording" and subject_coord is not None
-        if scoped:  # session/run ids are often reused across subjects (session 1 of every subject)
-            subjects = np.asarray(data.coords[subject_coord].values)
-            values = np.array([f"{s}/{v}" for s, v in zip(subjects, values)], dtype=object)
+        # Ids are often reused: session 1 of every subject, run 0 of every session. Compare them within those.
+        parents = [subject_coord] if subject_coord is not None and kind in ("recording", "run") else []
+        parents += session_coords if kind == "run" else []
+        scoped = bool(parents)
+        if scoped:
+            keys = [np.asarray(data.coords[parent].values) for parent in parents]
+            values = np.array(["/".join(map(str, parts)) for parts in zip(*keys, values)], dtype=object)
         folds_shared, examples = 0, []
         for train_trials, test_trials in split_trials:
             shared = set(values[trial_position.get_indexer(train_trials)]) & set(
@@ -192,7 +209,7 @@ def audit_splits(
             if shared:
                 folds_shared += 1
                 examples.extend(sorted(map(str, shared))[: 3 - len(examples)])
-        label = f"{name} (within {subject_coord})" if scoped else name
+        label = f"{name} (within {', '.join(parents)})" if scoped else name
         rows.append(
             {
                 "check": label,
@@ -206,9 +223,13 @@ def audit_splits(
             shared_coords.append(name)
 
     if samples is not None:
-        digests = np.array(
-            [hashlib.blake2b(np.ascontiguousarray(row).tobytes(), digest_size=16).digest() for row in samples]
+        # Object arrays hold pointers: hash their values' text instead of their bytes.
+        sample_bytes = (
+            (repr(row.tolist()).encode() for row in samples)
+            if samples.dtype == object
+            else (np.ascontiguousarray(row).tobytes() for row in samples)
         )
+        digests = np.array([hashlib.blake2b(row, digest_size=16).digest() for row in sample_bytes])
         folds_dup, n_dup = 0, 0
         for train_trials, test_trials in split_trials:
             train_digests = set(digests[trial_position.get_indexer(train_trials)])
