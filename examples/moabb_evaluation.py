@@ -45,7 +45,13 @@ def main() -> None:
     )
     sklearn_pipeline = make_pipeline(CSP(n_components=6, log=True), LinearDiscriminantAnalysis())
 
-    evaluation = WithinSessionEvaluation(paradigm=paradigm, datasets=[dataset], overwrite=True, n_jobs=1)
+    evaluation = WithinSessionEvaluation(
+        paradigm=paradigm,
+        datasets=[dataset],
+        overwrite=True,
+        n_jobs=1,
+        random_state=0,  # same folds for both
+    )
     results = evaluation.process(
         {
             "CSP+LDA (scikit-learn)": sklearn_pipeline,
