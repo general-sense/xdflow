@@ -244,8 +244,8 @@ class _FunctionStep(Transform):
     def _verify_independence(self, data: xr.DataArray, params: dict[str, Any], result: xr.DataArray) -> None:
         """Rerun on three trials alone and compare with their output when all trials were present.
 
-        A quick check on every call, not a proof: it catches outputs (values or per-trial coordinates) that
-        change with the other trials present, such as anything computed over the trial dim.
+        A quick check on every call, not a proof: it catches outputs (values or coordinates) that change with the
+        other trials present, such as anything computed over the trial dim.
         """
         if "trial" not in data.dims or data.sizes["trial"] < 3:
             return
@@ -256,6 +256,16 @@ class _FunctionStep(Transform):
         )
         if "trial" not in result.dims:
             raise ValueError(f"{name}() returned no 'trial' dim, so its output is not computed per trial. {hint}")
+        if "trial" not in data.indexes:  # no trial labels: match trials by position
+            if "trial" in result.indexes or result.sizes["trial"] != data.sizes["trial"]:
+                raise ValueError(
+                    f"{name}() changed the trials of data without a 'trial' coordinate, so they cannot be checked; "
+                    f"label the trials (data.assign_coords(trial=...)). {hint}"
+                )
+            positions = np.arange(data.sizes["trial"])
+            data, result = data.assign_coords(trial=positions), result.assign_coords(trial=positions)
+        if not (data.indexes["trial"].is_unique and pd.Index(result.trial.values).is_unique):
+            raise ValueError(f"Trial labels must be unique to check {name}(); relabel the trials. {hint}")
         kept = data.trial.values[pd.Index(result.trial.values).get_indexer(data.trial.values) >= 0]
         if kept.size == 0:
             raise ValueError(f"{name}() returned none of its input trials, so they cannot be checked. {hint}")
@@ -272,12 +282,11 @@ class _FunctionStep(Transform):
         alone, together = alone.sel(trial=labels), result.sel(trial=labels)
         if set(alone.dims) == set(together.dims):
             alone = alone.transpose(*together.dims)
-        per_trial_coords = [
-            str(coord) for coord, values in together.coords.items() if "trial" in values.dims and coord != "trial"
-        ]
+        # Every coordinate: statistics over trials can hide in a non-trial one (a channel's mean over trials).
+        coords = [str(coord) for coord in together.coords if coord != "trial"]
         same = _same(alone.variable, together.variable) and all(
             coord in alone.coords and _same(alone.coords[coord].variable, together.coords[coord].variable)
-            for coord in per_trial_coords
+            for coord in coords
         )
         if not same:
             raise ValueError(
@@ -286,6 +295,15 @@ class _FunctionStep(Transform):
                 "split, it would leak test trials into training. Move what it learns into a fit function: "
                 "@step(fit=...)."
             )
+
+    def _log_history(self, source_container: DataContainer, container: DataContainer) -> DataContainer:
+        container = super()._log_history(source_container, container)
+        # The class name identifies the functions; the function objects would make the output unpicklable (their
+        # module attribute is the class), which breaks caching.
+        params = container.data.attrs["data_history"][-1]["params"]
+        params.pop("func", None)
+        params.pop("fit_func", None)
+        return container
 
     def get_expected_output_dims(self, input_dims: tuple[str, ...], /) -> tuple[str, ...]:
         if self._declared_output_dims is None:

@@ -297,3 +297,29 @@ def test_object_coordinates_with_missing_values_pass(container):
         return data * 2
 
     double().transform(data)
+
+
+def test_data_without_trial_labels_passes_the_check(container):
+    unlabeled = DataContainer(container.data.drop_vars("trial"))
+    out = scale(factor=3.0).transform(unlabeled)
+    np.testing.assert_allclose(out.data.values, container.data.values * 3.0)
+
+
+def test_repeated_trial_labels_get_a_clear_error(container):
+    repeated = DataContainer(container.data.assign_coords(trial=np.arange(12) // 2))
+    with pytest.raises(ValueError, match="unique"):
+        scale().transform(repeated)
+
+
+def test_outputs_can_be_pickled_for_the_cache(container):
+    out = make_pipeline(scale(), recenter()).fit_transform(container)
+    assert pickle.loads(pickle.dumps(out)).data.equals(out.data)
+
+
+def test_statistics_over_trials_in_other_coordinates_are_rejected(container):
+    @step
+    def attach_channel_means(data):
+        return data.assign_coords(mu=("channel", data.mean(("trial", "time")).values))
+
+    with pytest.raises(ValueError, match="depending on which other trials"):
+        attach_channel_means().transform(container)

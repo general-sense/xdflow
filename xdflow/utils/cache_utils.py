@@ -255,6 +255,12 @@ def cache_result(
             except PermissionError:
                 # Skip caching if filesystem forbids writing (e.g., immutable files/attrs)
                 pass
+            except (pickle.PicklingError, AttributeError, TypeError) as exc:
+                # Not picklable (e.g. a lambda recorded in the data history): return the result uncached.
+                cache_path.unlink(missing_ok=True)
+                warnings.warn(
+                    f"Not caching a '{prefix}' result: it cannot be pickled ({exc}).", UserWarning, stacklevel=2
+                )
 
             return result
 

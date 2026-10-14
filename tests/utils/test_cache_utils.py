@@ -189,3 +189,17 @@ def test_unpicklable_fold_pipeline_runs_without_the_fit_cache():
     with pytest.warns(UserWarning, match="cannot be pickled"):
         validator.cross_validate(data)
     assert len(validator.cv_scores_) == 3
+
+
+def test_unpicklable_pipeline_output_runs_without_the_output_cache():
+    """A lambda step's output records the lambda in its history; the cached pipeline must still run."""
+    import pytest
+
+    from xdflow.composite import Pipeline
+    from xdflow.transforms.basic_transforms import FunctionTransform
+
+    data = DataContainer(xr.DataArray(np.ones((4, 2)), dims=("trial", "feature")))
+    pipeline = Pipeline("p", [("double", FunctionTransform(lambda x: x * 2))], use_cache=True)
+    with pytest.warns(UserWarning, match="cannot be pickled"):
+        out = pipeline.fit_transform(data)
+    np.testing.assert_array_equal(out.data.values, 2.0)
