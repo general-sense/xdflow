@@ -203,3 +203,89 @@ def test_a_fold_with_one_class_scores_like_scikit_learn():
     expected = cross_val_score(model, X, y, cv=pairs, scoring="f1")
     assert expected.tolist() == [0.0]
     np.testing.assert_allclose(evaluate(model, X, y, cv=pairs, scoring="f1").fold_scores, expected)
+
+
+@pytest.mark.parametrize("scoring", [["accuracy", "f1"], {"acc": "accuracy"}])
+def test_scoring_that_is_neither_a_name_nor_a_function_is_refused(model, X, y, scoring):
+    with pytest.raises(TypeError, match="scoring"):
+        evaluate(model, X, y, cv=3, scoring=scoring)
+
+
+def test_scikit_learn_scorer_objects_score_like_cross_val_score(model, X, y):
+    from sklearn.metrics import fbeta_score, make_scorer
+    from sklearn.model_selection import StratifiedKFold
+
+    scorer = make_scorer(fbeta_score, beta=2, pos_label="move")
+    expected = cross_val_score(model, X, y, cv=StratifiedKFold(3), scoring=scorer)
+    result = evaluate(model, X, y, cv=StratifiedKFold(3), scoring=scorer)
+    np.testing.assert_allclose(result.fold_scores, expected)
+    assert result.metric == "fbeta_score"
+
+
+def test_binary_f1_with_binary_folds_of_multiclass_labels_scores_like_scikit_learn():
+    from sklearn.model_selection import KFold
+    from sklearn.tree import DecisionTreeClassifier
+
+    codes = np.zeros(12, int)
+    codes[[1, 2, 7]], codes[3] = 1, 2
+    X = np.random.default_rng(0).normal(size=(12, 3)) + codes[:, None]
+    y = np.array([1, 2, 3])[codes]  # three classes overall, two in each fold
+    model = DecisionTreeClassifier(random_state=0)
+    expected = cross_val_score(model, X, y, cv=KFold(4), scoring="f1", error_score="raise")
+    np.testing.assert_allclose(evaluate(model, X, y, cv=KFold(4), scoring="f1").fold_scores, expected)
+
+
+@pytest.mark.parametrize("target", ["continuous", "nan"])
+def test_classifier_targets_scikit_learn_rejects_are_rejected(X, target):
+    y = np.linspace(0, 1, 120) if target == "continuous" else np.where(np.arange(120) % 5, np.arange(120) % 2, np.nan)
+    from sklearn.model_selection import KFold
+
+    with pytest.raises(ValueError, match="continuous|NaN"):
+        evaluate(LogisticRegression(), X.reshape(120, -1), y, cv=KFold(3), scoring=lambda t, p: float(np.mean(t == p)))
+
+
+def test_cv_none_means_the_default_folds(model, X, y):
+    np.testing.assert_allclose(evaluate(model, X, y, cv=None).fold_scores, evaluate(model, X, y).fold_scores)
+
+
+def test_an_xdflow_pipeline_takes_y_as_an_array(X, y):
+    pipeline = make_pipeline(
+        FlattenTransform(dims=("dim_1", "dim_2")),
+        SKLearnPredictor.from_estimator(LogisticRegression(), sample_dim="trial", target_coord="label"),
+    )
+    expected = evaluate(pipeline, X, metadata=pd.DataFrame({"label": y}), cv=GroupKFold(3), groups=np.arange(120) % 6)
+    result = evaluate(pipeline, X, y, cv=GroupKFold(3), groups=np.arange(120) % 6)
+    np.testing.assert_allclose(result.fold_scores, expected.fold_scores)
+
+
+def test_predicting_on_a_bare_array_explains_how_to_wrap_it(model, X, y):
+    final = evaluate(model, X, y, cv=3).fit_final()
+    for data in (X, xr.DataArray(X, dims=("trial", "channel", "time"))):
+        with pytest.raises(TypeError, match="from_numpy"):
+            final.predict(data)
+        with pytest.raises(TypeError, match="from_numpy"):
+            final.predict_proba(data)
+
+
+def test_reusing_a_validator_leaves_earlier_results_intact(model, X, y):
+    from sklearn.dummy import DummyClassifier
+
+    validator = KFoldValidator(n_splits=3, verbose=False)
+    first = evaluate(model, X, y, cv=validator)
+    scores = list(first.fold_scores)
+    evaluate(DummyClassifier(), X, y, cv=validator)
+    assert first.validator.cv_scores_ == scores
+    assert first.fit_final().steps[0].name == "pipeline"
+
+
+def test_groups_split_apart_by_the_splitter_warn(model, X, y, info):
+    from sklearn.model_selection import KFold
+
+    with pytest.warns(UserWarning, match="puts trials of the same 'group'"):
+        evaluate(model, X, y, groups=info.subject.to_numpy(), cv=KFold(3, shuffle=True, random_state=0))
+
+
+def test_summary_mean_is_the_mean_of_fold_scores(model, X, y):
+    validator = KFoldValidator(n_splits=7, verbose=False, pooling_score_weight=1.0, scoring="accuracy")
+    result = evaluate(model, X, y, cv=validator)
+    assert repr(result).startswith(f"{result.metric} {np.mean(result.fold_scores):.3f} ±")

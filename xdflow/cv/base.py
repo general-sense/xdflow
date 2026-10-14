@@ -488,6 +488,12 @@ class CrossValidator(ABC):
                 )
             return self._scoring_func, self._metric_name, self._scoring_needs_proba
 
+        if self.scoring is not None:
+            raise TypeError(
+                f"scoring must be a metric name, a callable or None; got {type(self.scoring).__name__}. "
+                "Score one metric at a time."
+            )
+
         # Auto-select based on is_classifier and is_multilabel
         if final_predictor.is_classifier:
             if getattr(final_predictor, "is_multilabel", False):
@@ -1438,6 +1444,8 @@ class CrossValidator(ABC):
             raise ValueError("No CV scores available. Run cross_validate() first.")
 
         mean_score = self.mean_cv_score_
+        if self.pooling_score_weight == 0:
+            return mean_score  # the pooled score is not needed, and may be undefined (binary F1 of 3 classes)
         pooled_score = self.oof_score_
 
         final_score = (1 - self.pooling_score_weight) * mean_score + self.pooling_score_weight * pooled_score

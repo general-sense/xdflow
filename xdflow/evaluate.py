@@ -1,5 +1,6 @@
 """One-call cross-validation of a model on structured data."""
 
+import copy
 import warnings
 from dataclasses import dataclass, field
 from typing import Any
@@ -9,6 +10,7 @@ import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.metrics import get_scorer
 from sklearn.model_selection import GroupKFold, LeaveOneGroupOut, StratifiedGroupKFold
+from sklearn.utils.multiclass import check_classification_targets
 
 from xdflow.composite import Pipeline
 from xdflow.composite.pipeline import make_pipeline
@@ -27,7 +29,8 @@ class EvaluationResult:
     """Cross-validation results, with every scored trial's prediction and metadata.
 
     Attributes:
-        score: Mean score over folds.
+        score: Mean score over folds (for a validator passed as ``cv``, its ``score_``, which blends in the
+            pooled score when its ``pooling_score_weight`` is set).
         metric: Name of the metric.
         fold_scores: Score of each fold.
         predictions: One row per scored trial: its trial coordinates (labels, subject, session...), ``y_true``,
@@ -81,7 +84,7 @@ class EvaluationResult:
         once = ", ".join(_label(s) for s in stateless.steps) if stateless is not None else "nothing"
         per_fold = ", ".join(_label(s) for s in stateful.steps) if stateful is not None else "nothing"
         lines = [
-            f"{self.metric} {self.score:.3f} ± {np.std(self.fold_scores):.3f} "
+            f"{self.metric} {np.mean(self.fold_scores):.3f} ± {np.std(self.fold_scores):.3f} "
             f"(mean ± sd over {len(self.fold_scores)} folds, {len(self.predictions)} trials)",
             f"Split: {self.cv_description}",
             f"Computed once: {once}. Refit in each fold: {per_fold}.",
@@ -131,8 +134,9 @@ def evaluate(
             validator. With ``groups`` and an int, each group is held out in turn when there are no more
             groups than folds, otherwise groups are split into ``cv`` folds stratified by class.
         scoring: A scikit-learn scoring name computed from predictions (``"accuracy"``, ``"balanced_accuracy"``,
-            ``"f1_macro"``, ``"r2"``, ``"neg_mean_absolute_error"``...), with scikit-learn's meaning, or a
-            callable ``(y_true, y_pred) -> float``. Defaults to accuracy for classifiers and R² for regressors.
+            ``"f1_macro"``, ``"r2"``, ``"neg_mean_absolute_error"``...) or scorer (``make_scorer(...)``), with
+            scikit-learn's meaning, or a callable ``(y_true, y_pred) -> float``. Defaults to accuracy for
+            classifiers and R² for regressors.
         metadata: DataFrame with one row per sample; its columns become trial coordinates usable as ``y``
             and ``groups``.
         dims: Dim names for NumPy input, starting with ``"trial"`` (e.g. ``("trial", "channel", "time")``).
@@ -146,15 +150,20 @@ def evaluate(
     Example:
         >>> result = evaluate(make_pipeline(CSP(6, log=True), LinearDiscriminantAnalysis()), epochs, groups="subject")
     """
+    if cv is None:
+        cv = 5  # scikit-learn's default
+    # Target values given as an array are named after what an xdflow model predicts ("label"...), else "y".
+    model_target = model.final_target_coord if isinstance(model, Pipeline) else getattr(model, "target_coord", None)
+    y_coord = model_target if isinstance(model, (Pipeline, Predictor)) and isinstance(model_target, str) else "y"
     container = _as_container(
         X,
         dims=dims,
         metadata=metadata,
-        y=None if isinstance(y, str) else y,
+        **{y_coord: None if isinstance(y, str) else y},
         group=None if isinstance(groups, str) else groups,
     )
     data = container.data
-    y_name = y if isinstance(y, str) else ("y" if y is not None else None)
+    y_name = y if isinstance(y, str) else (y_coord if y is not None else None)
     groups_name = groups if isinstance(groups, str) else ("group" if groups is not None else None)
 
     pipeline = _as_pipeline(model, y_name, data)
@@ -165,17 +174,23 @@ def evaluate(
             raise ValueError(f"'{name}' must be a trial coordinate; trial coordinates: {_trial_coords(data)}.")
     predictor = pipeline.predictive_transform
     is_classifier = bool(getattr(predictor, "is_classifier", False))
+    if is_classifier and isinstance(target, str) and not getattr(predictor, "is_multilabel", False):
+        check_classification_targets(data.coords[target].values)  # as scikit-learn does: no continuous or NaN labels
 
+    # scikit-learn scorer objects (make_scorer, get_scorer) score like their names; other callables are metrics.
+    is_scorer = callable(scoring) and type(scoring).__module__.startswith("sklearn.metrics")
     metric: str | None = scoring if isinstance(scoring, str) else getattr(scoring, "__name__", None)
+    if is_scorer:
+        metric = getattr(getattr(scoring, "_score_func", None), "__name__", "custom")
     if isinstance(cv, CrossValidator):
         metric = None  # the validator's own scoring applies (passing scoring as well is rejected below)
     elif scoring is None and isinstance(target, str):
         metric = "accuracy" if is_classifier else "r2"
-    if isinstance(metric, str) and (scoring is None or isinstance(scoring, str)):
+    if isinstance(metric, str) and (scoring is None or isinstance(scoring, str) or is_scorer):
         # Classes come from all labels, as an estimator's classes_ come from its training labels: a fold whose
         # trials are all of one class still scores like scikit-learn (e.g. binary F1 of 0, not an error).
         classes = np.unique(data.coords[target].values) if is_classifier and isinstance(target, str) else None
-        scoring = _sklearn_metric(metric, is_classifier, classes)
+        scoring = _sklearn_metric(scoring if is_scorer else metric, is_classifier, classes, name=metric)
     validator, description = _as_validator(
         cv, groups_name, data, is_classifier, target, scoring, random_state, cache, verbose
     )
@@ -183,6 +198,13 @@ def evaluate(
     validator.cross_validate(container, verbose=verbose)
 
     split = _audit(validator, data, groups_name)
+    if groups_name is not None and split is not None and groups_name in split.shared_coords:
+        warnings.warn(
+            f"The split ({description}) puts trials of the same '{groups_name}' in training and test sets. Use a "
+            "group splitter (GroupKFold, LeaveOneGroupOut...) or an int cv.",
+            UserWarning,
+            stacklevel=2,
+        )
     if groups_name is None and split is not None:
         # Warn only about units the data could be split by (a single subject is shared by every split).
         splittable = [name for name in split.shared_coords if name in grouping_coords(data, min_values=2)]
@@ -226,9 +248,10 @@ class _PredictedValues(RegressorMixin, _Predictions):
     pass
 
 
-def _sklearn_metric(name: str, is_classifier: bool, classes: Any = None) -> Any:
-    """A ``(y_true, y_pred) -> float`` metric with the meaning scikit-learn gives ``name``."""
-    scorer = get_scorer(name)  # raises, listing the valid names, for an unknown one
+def _sklearn_metric(scoring: Any, is_classifier: bool, classes: Any = None, name: str | None = None) -> Any:
+    """A ``(y_true, y_pred) -> float`` metric with the meaning scikit-learn gives the scoring name or scorer."""
+    scorer = get_scorer(scoring)  # raises, listing the valid names, for an unknown one
+    name = name or str(scoring)
 
     def score(y_true: Any, y_pred: Any, known: Any) -> float:
         if is_classifier:
@@ -318,7 +341,7 @@ def _as_validator(
     if isinstance(cv, CrossValidator):
         if groups_name is not None or scoring is not None:
             raise ValueError("groups and scoring come from the validator you passed; set them there instead.")
-        return cv, type(cv).__name__
+        return copy.deepcopy(cv), type(cv).__name__  # a copy: reusing cv must not change this result
 
     if scoring is None and isinstance(target, str):
         scoring = "accuracy" if is_classifier else "r2"

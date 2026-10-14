@@ -122,3 +122,32 @@ def test_classes_come_from_the_training_labels(X):
     clf = to_sklearn(template, DIMS, COORDS).fit(X[three != 2], three[three != 2])
     np.testing.assert_array_equal(clf.classes_, [0, 1])
     assert clf.predict_proba(X).shape == (80, 2)
+
+
+def test_predict_proba_with_bool_labels_has_a_column_per_class(X):
+    y = np.arange(80) % 2 == 0
+    clf = to_sklearn(_classifier_pipeline(), DIMS, COORDS).fit(X, y)
+    reference = LogisticRegression().fit(X[:, :, 5:].reshape(80, -1), y)
+    np.testing.assert_array_equal(clf.classes_, [False, True])
+    np.testing.assert_allclose(clf.predict_proba(X), reference.predict_proba(X[:, :, 5:].reshape(80, -1)), atol=1e-6)
+
+
+def test_continuous_targets_are_refused_by_a_classifier(X):
+    with pytest.raises(ValueError, match="continuous"):
+        to_sklearn(_classifier_pipeline(), DIMS, COORDS).fit(X, np.linspace(0, 1, 80))
+
+
+def test_clones_do_not_share_mutable_parameters(X, y):
+    from xdflow.transforms.function_step import step
+
+    @step
+    def gain(data, config):
+        return data * config["gain"]
+
+    pipeline = make_pipeline(
+        gain({"gain": 1.0}), FlattenTransform(dims=("channel", "time")), _classifier_pipeline().steps[-1].transform
+    )
+    clf = to_sklearn(pipeline, DIMS, COORDS).fit(X, y)
+    before = clf.predict_proba(X)
+    clone(clf).pipeline.steps[0].transform.config["gain"] = 20.0
+    np.testing.assert_array_equal(clf.predict_proba(X), before)

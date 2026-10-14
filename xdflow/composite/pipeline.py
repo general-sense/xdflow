@@ -250,6 +250,12 @@ class Pipeline(CompositeTransform):
         Returns:
             DataContainer transformed up to the final step
         """
+        if not isinstance(container, DataContainer):
+            raise TypeError(
+                f"Expected a DataContainer, got {type(container).__name__}. Wrap NumPy arrays with "
+                "xdflow.from_numpy(X, dims), an xr.DataArray with DataContainer(data), and MNE Epochs with "
+                "xdflow.from_mne_epochs(epochs)."
+            )
 
         transformed_container = container
         if len(self.steps) > 1:

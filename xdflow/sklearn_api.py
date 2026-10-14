@@ -1,9 +1,12 @@
 """Use an xdflow pipeline as a scikit-learn estimator (``cross_val_score``, ``GridSearchCV``, MOABB...)."""
 
+import copy
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils.validation import check_is_fitted
 
 from xdflow.composite import Pipeline
@@ -22,8 +25,9 @@ class _PipelineEstimator(BaseEstimator):
 
     def __sklearn_clone__(self) -> "_PipelineEstimator":
         # xdflow pipelines clone themselves (fresh, unfitted, current hyperparameters); sklearn's generic
-        # clone would try to rebuild them from get_params().
-        return type(self)(pipeline=self.pipeline.clone(), dims=self.dims, coords=self.coords)
+        # clone would try to rebuild them from get_params(). Deep-copied, as scikit-learn copies parameters, so
+        # editing a clone's mutable parameters (a dict) cannot change this estimator.
+        return type(self)(pipeline=copy.deepcopy(self.pipeline.clone()), dims=self.dims, coords=self.coords)
 
     def _target(self) -> str:
         target = self.pipeline.final_target_coord
@@ -59,6 +63,7 @@ class XDFlowClassifier(ClassifierMixin, _PipelineEstimator):
     """
 
     def fit(self, X: Any, y: Any) -> "XDFlowClassifier":
+        check_classification_targets(y)  # as scikit-learn classifiers do: no continuous or NaN labels
         super().fit(X, y)
         self.classes_ = np.asarray(self.pipeline_.get_labels())
         return self
@@ -72,8 +77,11 @@ class XDFlowClassifier(ClassifierMixin, _PipelineEstimator):
         if len(class_dims) != 1:
             raise ValueError(f"Expected probabilities with dims ('trial', <class dim>); got {proba.dims}.")
         class_dim = class_dims[0]
-        if class_dim in proba.coords:
-            proba = proba.sel({class_dim: self.classes_})
+        if class_dim in proba.coords:  # by position: .sel would read bool classes as a mask
+            columns = pd.Index(proba[class_dim].values).get_indexer(self.classes_)
+            if (columns < 0).any():
+                raise ValueError(f"Probabilities have no column for classes {list(self.classes_[columns < 0])}.")
+            proba = proba.isel({class_dim: columns})
         return np.asarray(proba.transpose("trial", class_dim).values)
 
 
