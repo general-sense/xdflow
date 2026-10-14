@@ -604,7 +604,7 @@ class EnsemblePredictor(CompositeTransform, Predictor):
         if self.is_classifier:
             if self.encoder is None or not hasattr(self.encoder, "classes_"):
                 raise ValueError(f"{self.__class__.__name__} requires a fitted encoder before calling predict.")
-            encoded_da = self._encode_target_coord(container.data)
+            encoded_da = self._encode_target_coord(container.data, missing_ok=True)
             encoded_container = DataContainer(encoded_da)
         else:
             encoded_container = container
@@ -684,7 +684,7 @@ class EnsemblePredictor(CompositeTransform, Predictor):
         # Encode target coordinate
         if self.encoder is None or not hasattr(self.encoder, "classes_"):
             raise ValueError(f"{self.__class__.__name__} requires a fitted encoder before calling predict_proba.")
-        encoded_da = self._encode_target_coord(container.data)
+        encoded_da = self._encode_target_coord(container.data, missing_ok=True)
         encoded_container = DataContainer(encoded_da)
 
         # Delegate to encoded entry point for ensemble logic
@@ -726,7 +726,7 @@ class EnsemblePredictor(CompositeTransform, Predictor):
                 f"{self.__class__.__name__} requires a fitted encoder before calling "
                 "predict_proba_with_uncertainty_components."
             )
-        encoded_da = self._encode_target_coord(container.data)
+        encoded_da = self._encode_target_coord(container.data, missing_ok=True)
         encoded_container = DataContainer(encoded_da)
 
         # Collect per-member probability predictions (aligned via shared encoder)
@@ -834,7 +834,7 @@ class EnsemblePredictor(CompositeTransform, Predictor):
         # Encode target coordinate
         if self.encoder is None or not hasattr(self.encoder, "classes_"):
             raise ValueError(f"{self.__class__.__name__} requires a fitted encoder before calling predict_proba.")
-        encoded_da = self._encode_target_coord(container.data)
+        encoded_da = self._encode_target_coord(container.data, missing_ok=True)
         encoded_container = DataContainer(encoded_da)
 
         # Collect per-member probability predictions (aligned via shared encoder)

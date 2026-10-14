@@ -51,3 +51,19 @@ def test_fit_still_requires_labels():
     pipeline = Pipeline("clf", [("lr", SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label"))])
     with pytest.raises(Exception, match="label"):
         pipeline.fit(_data(with_labels=False))
+
+
+def test_ensemble_predicts_without_labels():
+    from xdflow import EnsemblePredictor
+
+    members = [
+        ("a", SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label")),
+        ("b", SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label", C=0.1)),
+    ]
+    ensemble = EnsemblePredictor(members, sample_dim="trial", target_coord="label")
+    pipeline = Pipeline("ens", [("ens", ensemble)]).fit(_data(with_labels=True))
+    labeled, unlabeled = _data(with_labels=True), _data(with_labels=False)
+    np.testing.assert_array_equal(pipeline.predict(unlabeled).data.values, pipeline.predict(labeled).data.values)
+    np.testing.assert_allclose(
+        pipeline.predict_proba(unlabeled).data.values, pipeline.predict_proba(labeled).data.values
+    )
