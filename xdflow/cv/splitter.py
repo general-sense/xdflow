@@ -17,7 +17,7 @@ class SplitterValidator(CrossValidator):
     ``TimeSeriesSplit``, ``PredefinedSplit``...) while xdflow runs the pipeline: stateless steps once, stateful
     steps refit inside each training fold. The splitter receives the trial-level target as ``y`` and, when
     ``group_coord`` is set, that coordinate's values as ``groups``. Index pairs are positions along ``trial`` in
-    the data passed to ``cross_validate`` (with the Tuner's prefix caching, the data after the cached steps).
+    the data passed to ``cross_validate``.
 
     Example:
         >>> cv = SplitterValidator(StratifiedGroupKFold(5), group_coord="subject", scoring="accuracy")
@@ -77,10 +77,14 @@ class SplitterValidator(CrossValidator):
     def _split_holdout(self, container: DataContainer) -> tuple[np.ndarray, np.ndarray]:
         return container.data.trial.values, np.array([])
 
-    def cross_validate(self, initial_container: DataContainer, *args: Any, **kwargs: Any) -> float:
+    def cross_validate(
+        self, initial_container: DataContainer, *args: Any, input_trials: Any = None, **kwargs: Any
+    ) -> float:
+        """Cross-validate; ``input_trials`` is the trial order positions refer to, when ``initial_container`` is
+        the output of steps already run (the Tuner's prefix cache). See ``CrossValidator.cross_validate``."""
         # Positions (and order-sensitive splitters such as TimeSeriesSplit) refer to the trials as given, so
         # remember that order: steps that run before the split may reorder trials.
-        self._input_trials = initial_container.data.trial.values
+        self._input_trials = initial_container.data.trial.values if input_trials is None else np.asarray(input_trials)
         try:
             return super().cross_validate(initial_container, *args, **kwargs)
         finally:
@@ -124,11 +128,17 @@ class SplitterValidator(CrossValidator):
 
         split = getattr(self.splitter, "split", None)
         if split is not None:
+            target = self._split_target(data)
             try:
-                splits = list(split(np.zeros((n_trials, 1)), self._split_target(data), groups))
-            except ValueError as exc:
+                splits = list(split(np.zeros((n_trials, 1)), target, groups))
+            except (TypeError, ValueError) as exc:
                 if groups is None and "groups" in str(exc):
                     raise ValueError(f"{exc} Set group_coord to the trial coordinate holding the groups.") from exc
+                if target is None:
+                    raise ValueError(
+                        f"{type(self.splitter).__name__} failed without a target ({exc}); set stratify_coord to the "
+                        "trial coordinate holding it."
+                    ) from exc
                 raise
         else:
             splits = self.splitter

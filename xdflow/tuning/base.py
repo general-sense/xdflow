@@ -29,6 +29,7 @@ from xdflow.composite.base import CompositeTransform
 from xdflow.core.base import Transform
 from xdflow.core.data_container import DataContainer, TransformError
 from xdflow.cv.base import CrossValidator
+from xdflow.cv.splitter import SplitterValidator
 from xdflow.transforms.sklearn_transform import SKLearnTransform
 from xdflow.utils.cache_utils import _get_object_metadata, _get_object_params, hash_dict
 
@@ -390,7 +391,6 @@ class Tuner:
                 pipeline_template, initial_data = self.prepare_pipeline_with_caching(
                     self.pipelines_to_tune[pipeline_name]
                 )
-                print("pipeline_template", pipeline_template)
             else:
                 pipeline_template = self.pipelines_to_tune[pipeline_name]
                 initial_data = self.initial_data
@@ -420,8 +420,14 @@ class Tuner:
                 if trial.should_prune():
                     raise optuna.TrialPruned(f"Pruned at fold {step_idx} (score {fold_score:.4f})")
 
+            # Split positions refer to the trials as given, not as reordered by the cached prefix.
+            order = (
+                {"input_trials": self.initial_data.data.trial.values}
+                if isinstance(trial_validator, SplitterValidator)
+                else {}
+            )
             score = trial_validator.cross_validate(
-                initial_data, verbose=self.verbose_transforms, pruning_callback=pruning_callback
+                initial_data, verbose=self.verbose_transforms, pruning_callback=pruning_callback, **order
             )
             return score
 

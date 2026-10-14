@@ -8,6 +8,7 @@ from sklearn.model_selection import GroupKFold, LeaveOneGroupOut, StratifiedKFol
 
 from xdflow import DataContainer, Pipeline, Transform
 from xdflow.cv import SplitterValidator
+from xdflow.transforms.function_step import step
 from xdflow.transforms.sklearn_transform import SKLearnPredictor
 
 
@@ -112,3 +113,40 @@ def test_positions_refer_to_input_order_after_a_reordering_step(data):
     validator.set_pipeline(Pipeline("p", [("reverse", _Reverse()), ("lr", _pipeline().steps[0].transform)]))
     validator.cross_validate(DataContainer(data))
     np.testing.assert_array_equal(validator.split_trials_[0][1], data.trial.values[40:])
+
+
+_TRAINING_TRIALS = []
+
+
+def _record_training_trials(data):
+    _TRAINING_TRIALS.append(np.sort(data.trial.values))
+
+
+@step(fit=_record_training_trials)
+def _recorded(data, state, k=1.0):
+    return data
+
+
+def test_positions_refer_to_input_order_under_the_tuner_prefix_cache(data):
+    """The Tuner runs stateless steps before cross_validate; positions must still refer to the input order."""
+    pytest.importorskip("optuna")
+    from sklearn.model_selection import PredefinedSplit
+
+    from xdflow import Tuner
+
+    test_fold = np.r_[np.full(40, -1), np.zeros(20)]  # the last 20 trials as given are the test set
+    pipeline = Pipeline(
+        "p", [("reverse", _Reverse()), ("recorded", _recorded()), ("lr", _pipeline().steps[0].transform)]
+    )
+    validator = SplitterValidator(PredefinedSplit(test_fold), verbose=False)
+    _TRAINING_TRIALS.clear()
+    Tuner(pipeline, validator, {"p": {"recorded": {"k": [1.0]}}}, DataContainer(data), verbose=0).tune(n_trials=1)
+    np.testing.assert_array_equal(_TRAINING_TRIALS[0], data.trial.values[:40])
+
+
+def test_stratified_splitter_without_a_target_explains(data):
+    from xdflow.cv import SklearnCVAdapter, set_cv_container
+
+    adapter = SklearnCVAdapter(SplitterValidator(StratifiedKFold(3), verbose=False))
+    with set_cv_container(DataContainer(data)), pytest.raises(ValueError, match="stratify_coord"):
+        list(adapter.split(data.values, data.label.values))
