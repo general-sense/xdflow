@@ -16,6 +16,7 @@ import shutil
 import sysconfig
 import threading
 import time
+import uuid
 import warnings
 from collections.abc import Callable
 from functools import wraps
@@ -400,16 +401,25 @@ def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
 
 # Installed packages, the standard library and xdflow change only with their version; their module hash covers them.
 _LIBRARY_DIRS = tuple(
-    {str(Path(sysconfig.get_paths()[key]).resolve()) for key in ("stdlib", "platstdlib", "purelib", "platlib")}
-    | {str(Path(__file__).resolve().parents[1])}
+    {Path(sysconfig.get_paths()[key]).resolve() for key in ("stdlib", "platstdlib", "purelib", "platlib")}
+    | {Path(__file__).resolve().parents[1]}
 )
 
 
 def _is_user_code(obj: Any) -> bool:
-    """Defined in code users edit: a script, their own modules or a notebook (no source file)."""
-    module = obj if inspect.ismodule(obj) else inspect.getmodule(obj)
-    source = getattr(module, "__file__", None)
-    return source is None or not str(Path(source).resolve()).startswith(_LIBRARY_DIRS)
+    """Defined in code users edit: a script, their own modules or a notebook. A function is judged by the file its
+    code comes from, since functools.wraps copies another function's module."""
+    code = getattr(obj, "__code__", None)
+    if code is not None:
+        source = code.co_filename
+        if source.startswith("<"):  # exec, stdin, some notebook frontends
+            return True
+    else:
+        source = getattr(obj if inspect.ismodule(obj) else inspect.getmodule(obj), "__file__", None)
+        if source is None:
+            return True
+    path = Path(source).resolve()
+    return not any(path.is_relative_to(directory) for directory in _LIBRARY_DIRS)
 
 
 def _referenced_globals_metadata(fn: Callable, code: Any) -> dict[str, Any]:
@@ -435,8 +445,9 @@ def _referenced_globals_metadata(fn: Callable, code: Any) -> dict[str, Any]:
                 meta[name] = {"class": value.__qualname__, "module_hash": _get_module_hash_from_obj(value)}
             else:
                 meta[name] = _get_object_metadata(value)
-        except Exception:  # e.g. an unreadable module file: key the name only
-            meta[name] = type(value).__qualname__
+        except Exception:  # cannot fingerprint it (e.g. a cyclic container): never reuse this key
+            # shortcut: every call writes a new cache entry, bounded by the cache size limit
+            meta[name] = uuid.uuid4().hex
     return meta
 
 

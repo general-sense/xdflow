@@ -272,3 +272,39 @@ def test_cache_key_sees_the_contents_of_container_parameters_and_globals():
     assert key(frozenset(range(100))) != key(frozenset(range(101)))
     assert key(Mode.ADD) != key(Mode.MULTIPLY)
     assert hash_dict(_get_object_params(shift(Mode.ADD))) != hash_dict(_get_object_params(shift(Mode.MULTIPLY)))
+
+
+_WRAPPED_SCALE = 1
+
+
+def test_user_code_is_recognised_by_where_its_code_lives(monkeypatch):
+    import functools
+    import sys
+    from pathlib import Path
+    from types import ModuleType
+
+    import xdflow
+    from xdflow.utils.cache_utils import _get_callable_metadata, _is_user_code
+
+    sibling = ModuleType("helpers")
+    sibling.__file__ = str(Path(xdflow.__file__).parent.parent / "xdflow_helpers.py")
+    assert _is_user_code(sibling)
+
+    @functools.wraps(np.mean)  # advertises numpy's module, but the code is ours
+    def wrapped(x):
+        return x * _WRAPPED_SCALE
+
+    before = hash_dict(_get_callable_metadata(wrapped))
+    monkeypatch.setattr(sys.modules[__name__], "_WRAPPED_SCALE", 3)
+    assert hash_dict(_get_callable_metadata(wrapped)) != before
+
+
+def test_a_global_that_cannot_be_fingerprinted_never_reuses_a_key():
+    from xdflow.utils.cache_utils import _get_callable_metadata
+
+    namespace = {"config": {"offset": 1}}
+    namespace["config"]["self"] = namespace["config"]  # cyclic: cannot be hashed by content
+    exec("def cyclic(x):\n    return x + config['offset']\n", namespace)
+    assert hash_dict(_get_callable_metadata(namespace["cyclic"])) != hash_dict(
+        _get_callable_metadata(namespace["cyclic"])
+    )
