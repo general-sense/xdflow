@@ -62,9 +62,24 @@ as 0, 1, 2... in sorted order, so estimator parameters that name a class (a `cla
 `scoring` takes scikit-learn's metric names with their scikit-learn meaning (`"accuracy"`,
 `"balanced_accuracy"`, `"f1_macro"`, `"r2"`, `"neg_mean_absolute_error"`...), scorers from `make_scorer`, or a
 function `(y_true, y_pred) -> float`. The default is accuracy for classifiers and R² for regressors. Metrics
-computed from probabilities (`"roc_auc"`, `"neg_log_loss"`) need a validator passed as `cv` (below). An xdflow
-validator passed as `cv` keeps its own `scoring` and groups (by default weighted F1 for classifiers and R² for
-regressors).
+computed from probabilities (`"roc_auc"`, `"neg_log_loss"`) need a validator passed as `cv`, with a function
+of the class probabilities (one column per class, in sorted class order):
+
+```python
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedKFold
+
+auc = xdflow.SplitterValidator(
+    StratifiedKFold(5),
+    scoring=lambda y_true, proba: roc_auc_score(y_true, proba[:, 1]),
+    scoring_needs_proba=True,
+    verbose=False,
+)
+result = xdflow.evaluate(model, X, y, cv=auc)  # same fold scores as cross_val_score(..., scoring="roc_auc")
+```
+
+An xdflow validator passed as `cv` keeps its own `scoring` and groups (by default weighted F1 for classifiers
+and R² for regressors).
 
 ## Reading the result
 
