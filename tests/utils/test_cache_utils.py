@@ -357,3 +357,48 @@ def test_results_of_user_functions_are_not_cached_on_disk_unless_allowed(monkeyp
     assert run() == 0
     monkeypatch.setenv("XDFLOW_CACHE_USER_CODE", "1")
     assert run() > 0
+
+
+class _UserTransform:  # stands in for a Transform subclass written by a user; defined outside xdflow
+    pass
+
+
+def test_user_classes_count_as_user_code_and_builtins_do_not(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    from xdflow.composite import Pipeline
+    from xdflow.transforms.basic_transforms import IdentityTransform
+    from xdflow.utils.cache_utils import _get_object_params, _is_user_code, watch_user_code
+
+    assert not _is_user_code(int) and not _is_user_code(len) and not _is_user_code(sys)
+    notebook = ModuleType("__main__")  # a notebook's __main__ has no file
+    assert _is_user_code(notebook)
+
+    class Custom(IdentityTransform):
+        pass
+
+    for transform, expected in ((IdentityTransform(), False), (Custom(), True)):
+        with watch_user_code() as user_code:
+            _get_object_params(Pipeline("p", [("step", transform)]))
+        assert user_code.seen is expected
+
+
+def test_keys_that_will_not_be_used_are_not_computed(monkeypatch):
+    """Without XDFLOW_CACHE_USER_CODE, a key covering user code is abandoned at once (no hashing of its globals)."""
+    from xdflow.composite import Pipeline
+    from xdflow.transforms.function_step import step
+    from xdflow.utils import cache_utils
+
+    calls = []
+    original = cache_utils._referenced_globals_metadata
+    monkeypatch.setattr(cache_utils, "_referenced_globals_metadata", lambda *a: calls.append(1) or original(*a))
+    monkeypatch.delenv("XDFLOW_CACHE_USER_CODE", raising=False)
+
+    @step
+    def double(data):
+        return data * 2
+
+    data = DataContainer(xr.DataArray(np.ones((4, 2)), dims=("trial", "feature")))
+    Pipeline("p", [("double", double())], use_cache=True).fit_transform(data)
+    assert calls == []

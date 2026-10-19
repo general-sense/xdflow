@@ -368,15 +368,30 @@ def cache_user_code() -> bool:
 
 @contextmanager
 def watch_user_code() -> Iterator[Any]:
-    """Note whether the cache keys built inside the block fingerprint a function from user code."""
+    """Note whether the cache keys built inside the block cover user code (functions or classes). Unless
+    ``cache_user_code()``, building such a key stops there: the key would not be used."""
     outer = getattr(_user_code_in_key, "seen", None)
     _user_code_in_key.seen = False
     watched = types.SimpleNamespace(seen=False)
     try:
         yield watched
+    except _UserCodeInKey:
+        pass
     finally:
         watched.seen = _user_code_in_key.seen
         _user_code_in_key.seen = None if outer is None else outer or watched.seen
+
+
+class _UserCodeInKey(BaseException):  # BaseException: must pass the `except Exception` fallbacks while hashing
+    """The cache key being built covers user code, which is not cached; stop building it."""
+
+
+def _note_user_code() -> None:
+    if getattr(_user_code_in_key, "seen", None) is None:  # not building a cache key (e.g. logging parameters)
+        return
+    _user_code_in_key.seen = True
+    if not cache_user_code():
+        raise _UserCodeInKey
 
 
 def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
@@ -411,8 +426,7 @@ def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
             meta["kwdefaults"] = _get_object_metadata(dict(fn.__kwdefaults__ or {}))  # type: ignore[attr-defined]
             meta["closure"] = _get_object_metadata(cells)
             if _is_user_code(fn):
-                if getattr(_user_code_in_key, "seen", None) is not None:
-                    _user_code_in_key.seen = True
+                _note_user_code()
                 meta["globals"] = _referenced_globals_metadata(fn, code)
         elif not isinstance(fn, type):
             # Callable instance (ufunc, operator.methodcaller, object with __call__): hash its pickled state,
@@ -445,12 +459,13 @@ def _is_user_code(obj: Any) -> bool:
     code = getattr(obj, "__code__", None)
     if code is not None:
         source = code.co_filename
-        if source.startswith("<"):  # exec, stdin, some notebook frontends
-            return True
+        if source.startswith("<"):  # exec, stdin, some notebook frontends; "<frozen os>" is the standard library
+            return not source.startswith("<frozen")
     else:
-        source = getattr(obj if inspect.ismodule(obj) else inspect.getmodule(obj), "__file__", None)
-        if source is None:
-            return True
+        module = obj if inspect.ismodule(obj) else inspect.getmodule(obj)
+        source = getattr(module, "__file__", None)
+        if source is None:  # a notebook's __main__, or a built-in module
+            return getattr(module, "__name__", None) == "__main__"
     path = Path(source).resolve()
     return not any(path.is_relative_to(directory) for directory in _LIBRARY_DIRS)
 
@@ -544,6 +559,9 @@ def _get_object_params(obj: Any) -> Any:
 
     if _is_plain_callable(obj):
         return _get_callable_metadata(obj)
+
+    if hasattr(obj, "__dict__") and _is_user_code(obj if isinstance(obj, type) else type(obj)):
+        _note_user_code()  # e.g. a Transform subclass: its methods may call code the key cannot see
 
     if not hasattr(obj, "__dict__"):
         if isinstance(obj, (list, tuple)):
