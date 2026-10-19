@@ -20,7 +20,15 @@ from xdflow.interop import _as_container
 _SUBJECT_WORDS = {"subject", "subj", "participant", "patient", "animal", "mouse", "rat", "monkey", "individual"}
 _RECORDING_WORDS = {"session", "sess", "day", "visit", "site"}
 _RUN_WORDS = {"run", "recording", "segment", "block"}  # parts of a session
-_SOURCE_NAMES = {"orig_trial", "original_trial", "source_trial", "parent_trial", "epoch_source", "window_source"}
+_SOURCE_NAMES = {
+    "orig_trial",
+    "original_trial",
+    "source_trial",
+    "parent_trial",
+    "epoch",
+    "epoch_source",
+    "window_source",
+}
 _ID_SUFFIXES = {"id", "ids", "nr", "no", "num", "number", "idx", "index", "code", "name", "label", "key"}
 
 
@@ -49,10 +57,13 @@ def _grouping_kind(name: str) -> str | None:
     (``subject``, ``SubjectID``, ``mouse_ids``, ``block_nr``, ``recording_session``), None otherwise, including
     attributes such as ``subject_age``."""
     tokens = [token for token in re.split(r"[^a-z0-9]+", name.lower()) if token]
-    if len(tokens) > 1 and tokens[-1] in _ID_SUFFIXES:
+    stripped = len(tokens) > 1 and tokens[-1] in _ID_SUFFIXES
+    if stripped:
         tokens = tokens[:-1]
     if not tokens:
         return None
+    if tokens == ["trial"]:  # trial_id, trial_nr: the trial a window was cut from; not the "trial" dim itself
+        return "source" if stripped else None
     if "_".join(tokens) in _SOURCE_NAMES or "_".join(tokens[-2:]) in _SOURCE_NAMES:
         return "source"
     word = tokens[-1]
@@ -64,6 +75,9 @@ def _grouping_kind(name: str) -> str | None:
         if candidate in _RUN_WORDS:
             return "run"
     return None
+
+
+_NOTHING_TO_AUDIT = "no exact duplicates; no subject, session or source-trial coordinate to audit."
 
 
 @dataclass
@@ -91,7 +105,9 @@ class SplitReport:
         return not self.findings
 
     def __repr__(self) -> str:
-        lines = [f"Split check over {self.n_folds} folds: " + ("nothing shared." if self.ok else "shared data found.")]
+        audited = [check for check in self.table.get("check", []) if check != "identical samples"]
+        verdict = "shared data found." if not self.ok else "nothing shared." if audited else _NOTHING_TO_AUDIT
+        lines = [f"Split check over {self.n_folds} folds: {verdict}"]
         lines += [f"  - {finding}" for finding in self.findings]
         lines += [f"  {note}" for note in self.notes]
         if not self.table.empty:
@@ -254,7 +270,9 @@ def audit_splits(
     notes = []
     if not coords:
         notes.append(
-            "No subject, session or source-trial coordinate recognised; pass groups= to audit another coordinate."
+            "No subject, session or source-trial coordinate recognised (subject, session, run, orig_trial, "
+            "epoch_id...); pass groups= to audit another. Windows that partly overlap are found only through the "
+            "trial they were cut from."
         )
     return SplitReport(
         n_folds=len(split_trials),
@@ -273,7 +291,8 @@ def _describe_shared(name: str, kind: str | None, folds_shared: int, n_folds: in
             "training samples make the score optimistic."
         )
     unit = name.removesuffix("_id").removesuffix("_ids")
+    article = "an" if unit[:1].lower() in "aeiou" else "a"
     return (
         f"The same '{name}' values appear in training and test sets {where}: the score measures performance on "
-        f"new trials from a {unit} seen in training, not on a new {unit}."
+        f"new trials from {article} {unit} seen in training, not on a new {unit}."
     )

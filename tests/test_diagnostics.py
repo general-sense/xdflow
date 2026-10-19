@@ -44,6 +44,10 @@ def info():
         ("participant_code", "subject"),
         ("recording_session", "recording"),
         ("orig_trial_id", "source"),
+        ("epoch_id", "source"),
+        ("epoch", "source"),
+        ("trial_id", "source"),
+        ("trial_nr", "source"),
         ("subject_age", None),
         ("session_duration", None),
         ("run_length", None),
@@ -167,3 +171,22 @@ def test_runs_are_not_scoped_by_other_recording_coordinates():
     info = pd.DataFrame({"session": 1, "run": 1, "day": [1, 1, 2, 2]})  # one run spanning midnight
     report = check_split(np.arange(4.0)[:, None], [([0, 1], [2, 3])], metadata=info)
     assert "run" in report.shared_coords
+
+
+def test_windows_cut_from_one_epoch_are_found_under_common_names(X, y):
+    data = from_numpy(X, ("trial", "feature"), label=y, epoch_id=np.repeat(np.arange(20), 3))
+    report = check_split(data, StratifiedKFold(3, shuffle=True, random_state=0), y="label")
+    assert "near-copies" in report.findings[0]
+
+
+def test_a_report_with_nothing_to_audit_says_so(X):
+    report = check_split(X, 3)
+    assert report.ok
+    assert "nothing shared" not in repr(report)
+    assert "no subject, session or source-trial coordinate" in repr(report)
+
+
+def test_findings_use_the_right_article(X, y):
+    data = from_numpy(X, ("trial", "feature"), label=y, animal=np.repeat(np.arange(6), 10))
+    finding = check_split(data, StratifiedKFold(3, shuffle=True, random_state=0), y="label").findings[0]
+    assert "from an animal seen in training" in finding

@@ -19,7 +19,7 @@ from xdflow.core.data_container import DataContainer
 from xdflow.cv.base import CrossValidator
 from xdflow.cv.kfold import KFoldValidator
 from xdflow.cv.splitter import SplitterValidator
-from xdflow.diagnostics import SplitReport, audit_splits, grouping_coords
+from xdflow.diagnostics import _NOTHING_TO_AUDIT, SplitReport, audit_splits, grouping_coords
 from xdflow.interop import _as_container
 from xdflow.transforms.sklearn_transform import SKLearnPredictor
 
@@ -94,8 +94,13 @@ class EvaluationResult:
             lines += ["", f"By {self.groups}:", table.round(3).to_string(max_rows=12)]
         if self.split is not None:
             checked = ", ".join(self.split.table["check"]) if not self.split.table.empty else "nothing"
+            clean = (
+                f"nothing shared between training and test sets ({checked})."
+                if checked != "identical samples"
+                else _NOTHING_TO_AUDIT
+            )
             lines += [""] + (
-                [f"Split check: nothing shared between training and test sets ({checked})."]
+                [f"Split check: {clean}"]
                 if self.split.ok
                 else ["Split check:"] + [f"  - {finding}" for finding in self.split.findings]
             )
