@@ -151,7 +151,8 @@ def evaluate(
             and ``groups``.
         dims: Dim names for NumPy input, starting with ``"trial"`` (e.g. ``("trial", "channel", "time")``).
         random_state: Seed for fold shuffling.
-        cache: Reuse per-fold fits cached on disk from earlier identical runs.
+        cache: Reuse per-fold fits cached on disk from earlier identical runs (fits that depend on functions
+            from your own code are recomputed unless ``XDFLOW_CACHE_USER_CODE=1``).
         verbose: Print progress.
 
     Returns:

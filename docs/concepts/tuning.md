@@ -85,6 +85,8 @@ The static prefix is fit/transformed once and reused as the trial input. The dyn
 
 If a step learns from samples or depends on the split boundary, it should be marked stateful so it is not cached across folds or trials incorrectly.
 
+The prefix is reused through the disk cache. Results that depend on your own functions are recomputed rather than reused from the disk cache, since xdflow cannot see every code they depend on; set `XDFLOW_CACHE_USER_CODE=1` to cache them when they depend only on their code, parameters and the modules they read. Without it, a prefix that contains your own functions is recomputed for each trial.
+
 ## Final model and holdout score
 
 After tuning, the common workflow is:

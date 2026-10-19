@@ -13,8 +13,8 @@ a model adapter. Prefer existing transforms first, `SKLearnTransformer` or
 ## Functions as Steps
 
 Decorate a function of an `xarray.DataArray` with `@step`. Its other parameters
-become the step's hyperparameters, so it clones, caches and tunes like any
-built-in transform:
+become the step's hyperparameters, so it clones and tunes like any built-in
+transform, and cross-validation computes it once for all folds:
 
 ```python
 import numpy as np
@@ -64,7 +64,12 @@ def recenter(data, state):
 `fit` receives the hyperparameters it names, all declared on the step function. Pass
 `output_dims=(...)` to `@step` to take part in pipeline dimension checks. Define step
 functions at module level (or at the top of a notebook) so fitted pipelines can be
-pickled and cached.
+pickled.
+
+Results that depend on your own functions are recomputed rather than reused from the
+disk cache, since xdflow cannot see every code they depend on; set
+`XDFLOW_CACHE_USER_CODE=1` to cache them when they depend only on their code,
+parameters and the modules they read.
 
 ## The Transform Contract
 

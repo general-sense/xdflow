@@ -127,7 +127,9 @@ changes. **`xdflow` finds the optimal point for you, automatically, at every lev
    caching on (the default when tuning; `Pipeline(use_cache=True)` otherwise), its output is stored under
    a hash of the data values, coordinates and attrs, every step's configuration, and the code. Tuning
    trials that only change later steps reuse it instead of recomputing features. Fitted fold models are
-   cached under their exact training set.
+   cached under their exact training set. Results that depend on your own functions (`@xdflow.step`,
+   lambdas) are recomputed rather than reused from disk unless you set `XDFLOW_CACHE_USER_CODE=1`, since
+   xdflow cannot see every code a function depends on.
 3. **Splits by name.** Folds and holdouts are defined by coordinates such as `subject` or `session`, so
    keeping correlated samples apart is one argument rather than a `groups` array kept in sync by hand.
    You choose what to keep apart; xdflow keeps it in sync, everywhere.
@@ -313,7 +315,8 @@ print(f"Weighted F1: {cv.cross_validate(data):.3f}")
   `SKLearnPredictor.from_estimator`. Multi-target regression, multilabel classification, and sample
   weights are supported.
 - **Custom steps are functions.** `@xdflow.step` turns a function of an `xarray.DataArray` into a step that
-  caches, clones and tunes like a built-in one; steps that learn from training data take a `fit` function.
+  clones and tunes like a built-in one and runs once for all folds; steps that learn from training data take
+  a `fit` function.
   For full control, a transform is a small class with `_fit`/`_transform` and declared dimensions, easy to
   write, test, review, and generate with LLM coding tools ([guide](docs/guides/writing-transforms.md)).
 

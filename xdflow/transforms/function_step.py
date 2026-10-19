@@ -37,8 +37,9 @@ def step(
 
     The function's first parameter receives the data as an ``xr.DataArray``; its other parameters become the
     step's hyperparameters. The decorated name is a ``Transform`` class: call it with the hyperparameters to
-    get a step, which clones, caches and tunes like any built-in transform (``"power__band"`` for a step named
-    ``"power"``). The original function stays available as ``.func``.
+    get a step, which clones and tunes like any built-in transform (``"power__band"`` for a step named
+    ``"power"``). The original function stays available as ``.func``. Its results are not reused from the disk
+    cache unless ``XDFLOW_CACHE_USER_CODE=1`` (see ``xdflow.utils.cache_utils.cache_user_code``).
 
     The function returns an ``xr.DataArray``, or a NumPy array with the same shape as its input (it is given
     the input's dims and coords). It receives a read-only view of the data, so in-place edits raise instead of
