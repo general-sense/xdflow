@@ -12,15 +12,15 @@ import inspect
 import json
 import os
 import pickle
+import pickletools
 import shutil
+import sys
 import sysconfig
 import threading
 import time
-import types
 import uuid
 import warnings
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -222,24 +222,21 @@ def cache_result(
 
             # Verbosity does not change results, so it must not change the key
             key_kwargs = {k: v for k, v in kwargs.items() if k != "verbose"}
-            with watch_user_code() as user_code:
-                if key_gen_func and instance:
-                    key_dict = key_gen_func(func, *args, **key_kwargs)
-                else:
-                    # Get arguments of function
-                    bound_args = inspect.signature(func).bind(*args, **key_kwargs)
-                    bound_args.apply_defaults()
-                    key_dict = {
-                        k: _get_object_metadata(v)
-                        for k, v in bound_args.arguments.items()
-                        if k != "self" or not instance
-                    }
-                    if instance:
-                        # Make sure the class instance is the same
-                        key_dict["config"] = _get_object_params(instance)
-                        key_dict["module_hash"] = _get_module_hash_from_obj(instance)
-            if user_code.seen and not cache_user_code():
-                return func(*args, **kwargs)
+            if not cache_user_code() and references_user_code(*args, *key_kwargs.values()):
+                return func(*args, **kwargs)  # depends on user code, which a key cannot fully cover
+            if key_gen_func and instance:
+                key_dict = key_gen_func(func, *args, **key_kwargs)
+            else:
+                # Get arguments of function
+                bound_args = inspect.signature(func).bind(*args, **key_kwargs)
+                bound_args.apply_defaults()
+                key_dict = {
+                    k: _get_object_metadata(v) for k, v in bound_args.arguments.items() if k != "self" or not instance
+                }
+                if instance:
+                    # Make sure the class instance is the same
+                    key_dict["config"] = _get_object_params(instance)
+                    key_dict["module_hash"] = _get_module_hash_from_obj(instance)
 
             cache_key = hash_dict(key_dict)
             cache_path = _get_cache_dir(prefix) / f"{cache_key}.pkl"
@@ -353,45 +350,38 @@ def _is_plain_callable(obj: Any) -> bool:
 
 
 _callables_in_progress = threading.local()
-_user_code_in_key = threading.local()
 
 
 def cache_user_code() -> bool:
-    """Whether results that depend on functions from user code may be cached on disk (``XDFLOW_CACHE_USER_CODE=1``).
+    """Whether results that depend on user code may be cached on disk (``XDFLOW_CACHE_USER_CODE=1``).
 
     Off by default: a key covers a function's code, parameters, the globals it reads and the source of the
     modules they come from, but not everything it can depend on (attributes of a submodule, methods of a class,
-    values changed at runtime, eval). Turn it on when your functions depend only on those.
+    values changed at runtime, eval). Turn it on when your functions depend only on those, and restart after
+    editing their modules.
     """
     return os.environ.get("XDFLOW_CACHE_USER_CODE", "").strip().lower() in {"1", "true", "yes"}
 
 
-@contextmanager
-def watch_user_code() -> Iterator[Any]:
-    """Note whether the cache keys built inside the block cover user code (functions or classes). Unless
-    ``cache_user_code()``, building such a key stops there: the key would not be used."""
-    outer = getattr(_user_code_in_key, "seen", None)
-    _user_code_in_key.seen = False
-    watched = types.SimpleNamespace(seen=False)
+def references_user_code(*objects: Any) -> bool:
+    """Whether the objects refer to code from user modules: functions, classes or callables written by the user,
+    wherever they sit (parameters, wrapped estimators, scorers, partials, data attrs).
+
+    Pickling records every function and class it cannot store by value as a reference to its module, so the
+    references in the pickled objects are exactly the code they depend on. Objects that cannot be pickled (lambdas,
+    local functions) count as user code. For data, only attrs are checked (not ``data_history``, which records the
+    steps already applied: the data values hold their results).
+    """
+    carriers = [
+        {k: v for k, v in obj.data.attrs.items() if k != "data_history"} if isinstance(obj, DataContainer) else obj
+        for obj in objects
+    ]
     try:
-        yield watched
-    except _UserCodeInKey:
-        pass
-    finally:
-        watched.seen = _user_code_in_key.seen
-        _user_code_in_key.seen = None if outer is None else outer or watched.seen
-
-
-class _UserCodeInKey(BaseException):  # BaseException: must pass the `except Exception` fallbacks while hashing
-    """The cache key being built covers user code, which is not cached; stop building it."""
-
-
-def _note_user_code() -> None:
-    if getattr(_user_code_in_key, "seen", None) is None:  # not building a cache key (e.g. logging parameters)
-        return
-    _user_code_in_key.seen = True
-    if not cache_user_code():
-        raise _UserCodeInKey
+        payload = pickle.dumps(carriers, protocol=2)  # protocol 2 names each reference in a GLOBAL opcode
+    except Exception:
+        return True
+    modules = {arg.split(" ", 1)[0] for opcode, arg, _ in pickletools.genops(payload) if opcode.name == "GLOBAL"}
+    return any(name in sys.modules and _is_user_code(sys.modules[name]) for name in modules)
 
 
 def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
@@ -426,11 +416,8 @@ def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
             meta["kwdefaults"] = _get_object_metadata(dict(fn.__kwdefaults__ or {}))  # type: ignore[attr-defined]
             meta["closure"] = _get_object_metadata(cells)
             if _is_user_code(fn):
-                _note_user_code()
                 meta["globals"] = _referenced_globals_metadata(fn, code)
         elif not isinstance(fn, type):
-            if _is_user_code(type(fn)):  # its __call__ may read code the key cannot see
-                _note_user_code()
             # Callable instance (ufunc, operator.methodcaller, object with __call__): hash its pickled state,
             # which covers __slots__ and C-level configuration; fall back to public attributes.
             try:
@@ -561,9 +548,6 @@ def _get_object_params(obj: Any) -> Any:
 
     if _is_plain_callable(obj):
         return _get_callable_metadata(obj)
-
-    if hasattr(obj, "__dict__") and _is_user_code(obj if isinstance(obj, type) else type(obj)):
-        _note_user_code()  # e.g. a Transform subclass: its methods may call code the key cannot see
 
     if not hasattr(obj, "__dict__"):
         if isinstance(obj, (list, tuple)):

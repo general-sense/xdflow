@@ -348,3 +348,28 @@ def test_metadata_rows_match_numpy_rows_by_position(model, X, y):
 def test_validator_hint_names_a_group_splitter(model, X, y, info):
     with pytest.warns(UserWarning, match="GroupKFold"):
         evaluate(model, X, y, metadata=info, cv=KFoldValidator(n_splits=3, verbose=False))
+
+
+@pytest.mark.parametrize("kind", ["nan", "categorical", "timezone", "range_index"])
+def test_metadata_label_checks_compare_labels_by_value(kind):
+    from xdflow.interop import _as_container
+
+    labels = {
+        "nan": pd.Index([2.0, np.nan, 1.0]),
+        "categorical": pd.CategoricalIndex(["b", "a", "c"], categories=["c", "b", "a"]),
+        "timezone": pd.DatetimeIndex(["2026-01-01", "2026-01-02", "2026-01-03"], tz="UTC"),
+        "range_index": pd.Index([2, 0, 1]),
+    }[kind]
+    data = xr.DataArray(np.arange(3.0)[:, None], dims=("trial", "f"), coords={"trial": labels.to_numpy()})
+    if kind == "range_index":  # rows already in the data's order, positional: accepted
+        rows = pd.DataFrame({"subject": [20, 0, 10]})
+    elif kind == "nan":  # same labels, other order: refused
+        rows = pd.DataFrame({"subject": [10, 20, 0]}, index=pd.Index([1.0, 2.0, np.nan]))
+    else:  # same labels in the same order (other categories / time zone): accepted
+        index = labels.set_categories(["a", "b", "c"]) if kind == "categorical" else labels.tz_convert("US/Eastern")
+        rows = pd.DataFrame({"subject": [20, 0, 10]}, index=index)
+    if kind == "nan":
+        with pytest.raises(ValueError, match="order"):
+            _as_container(data, metadata=rows)
+    else:
+        np.testing.assert_array_equal(_as_container(data, metadata=rows).data.subject.values, [20, 0, 10])

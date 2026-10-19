@@ -30,9 +30,9 @@ from xdflow.utils.cache_utils import (
     _get_object_metadata,
     cache_user_code,
     get_module_hashes_for_object,
+    references_user_code,
     save_cached_object,
     try_load_cached_object,
-    watch_user_code,
 )
 from xdflow.utils.target_utils import extract_target_array
 from xdflow.utils.visualizations import plot_confusion_matrix
@@ -739,24 +739,25 @@ class CrossValidator(ABC):
         Returns:
             Fitted pipeline (either newly fitted or loaded from cache)
         """
+        # Fits that depend on user code are not reused: a key cannot cover everything that code depends on.
+        use_cache = self.use_stateful_fit_cache and (
+            cache_user_code() or not references_user_code(fold_pipeline, train_container)
+        )
         key_dict = None
-        if self.use_stateful_fit_cache:
+        if use_cache:
             # Snapshot the key before fitting: it references live objects that fit mutates, and the
             # save below must use the same key as the lookup.
-            with watch_user_code() as user_code:
-                key_dict = _get_object_metadata(
-                    {
-                        "kind": "stateful_fit",
-                        "pipeline_name": getattr(fold_pipeline, "name", "pipeline"),
-                        "stateful_config": (
-                            fold_pipeline.get_params(deep=True) if hasattr(fold_pipeline, "get_params") else None
-                        ),
-                        "module_hashes": get_module_hashes_for_object(fold_pipeline),
-                        "train_signature": train_container,
-                    }
-                )
-            if user_code.seen and not cache_user_code():
-                key_dict = None  # functions from user code: their results are not reused (see cache_user_code)
+            key_dict = _get_object_metadata(
+                {
+                    "kind": "stateful_fit",
+                    "pipeline_name": getattr(fold_pipeline, "name", "pipeline"),
+                    "stateful_config": (
+                        fold_pipeline.get_params(deep=True) if hasattr(fold_pipeline, "get_params") else None
+                    ),
+                    "module_hashes": get_module_hashes_for_object(fold_pipeline),
+                    "train_signature": train_container,
+                }
+            )
         if key_dict is not None:
             cached = try_load_cached_object(prefix="stateful_fit", key_dict=key_dict)
             if cached is None:

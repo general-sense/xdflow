@@ -363,57 +363,51 @@ class _UserTransform:  # stands in for a Transform subclass written by a user; d
     pass
 
 
-def test_user_classes_count_as_user_code_and_builtins_do_not(monkeypatch):
+def test_user_code_is_found_wherever_it_sits():
+    """Functions, classes and callables from user code are found in parameters, wrapped estimators, scorers,
+    partials and data attrs; built-in code (including compiled SciPy functions) is not."""
+    import functools
     import sys
     from types import ModuleType
 
+    import scipy.special
+    from sklearn.linear_model import Ridge
+    from sklearn.metrics import make_scorer
+    from sklearn.model_selection import GridSearchCV
+
     from xdflow.composite import Pipeline
-    from xdflow.transforms.basic_transforms import IdentityTransform
-    from xdflow.utils.cache_utils import _get_object_params, _is_user_code, watch_user_code
+    from xdflow.transforms.basic_transforms import FunctionTransform, IdentityTransform
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+    from xdflow.utils.cache_utils import _is_user_code, references_user_code
 
     assert not _is_user_code(int) and not _is_user_code(len) and not _is_user_code(sys)
-    notebook = ModuleType("__main__")  # a notebook's __main__ has no file
-    assert _is_user_code(notebook)
+    assert _is_user_code(ModuleType("__main__"))  # a notebook's __main__ has no file
 
     class Custom(IdentityTransform):
         pass
 
-    for transform, expected in ((IdentityTransform(), False), (Custom(), True)):
-        with watch_user_code() as user_code:
-            _get_object_params(Pipeline("p", [("step", transform)]))
-        assert user_code.seen is expected
+    def metric(y_true, y_pred):
+        return 0.0
 
-
-def test_keys_that_will_not_be_used_are_not_computed(monkeypatch):
-    """Without XDFLOW_CACHE_USER_CODE, a key covering user code is abandoned at once (no hashing of its globals)."""
-    from xdflow.composite import Pipeline
-    from xdflow.transforms.function_step import step
-    from xdflow.utils import cache_utils
-
-    calls = []
-    original = cache_utils._referenced_globals_metadata
-    monkeypatch.setattr(cache_utils, "_referenced_globals_metadata", lambda *a: calls.append(1) or original(*a))
-    monkeypatch.delenv("XDFLOW_CACHE_USER_CODE", raising=False)
-
-    @step
-    def double(data):
-        return data * 2
-
-    data = DataContainer(xr.DataArray(np.ones((4, 2)), dims=("trial", "feature")))
-    Pipeline("p", [("double", double())], use_cache=True).fit_transform(data)
-    assert calls == []
+    searched = GridSearchCV(Ridge(), {"alpha": [1.0]}, scoring=make_scorer(metric))
+    for user in (
+        Pipeline("p", [("step", Custom())]),
+        Pipeline("p", [("f", FunctionTransform(_UserCallable()))]),
+        SKLearnPredictor.from_estimator(searched, sample_dim="trial", target_coord="y"),
+        functools.partial(xr.apply_ufunc, _UserTransform),
+        {"a": [_UserTransform]},
+        np.vectorize(metric),
+        DataContainer(xr.DataArray(np.ones((2, 2)), dims=("trial", "f"), attrs={"scale": _UserCallable()})),
+    ):
+        assert references_user_code(user), user
+    for builtin in (
+        Pipeline("p", [("step", IdentityTransform())]),
+        functools.partial(xr.apply_ufunc, scipy.special.expit),
+        FunctionTransform(np.abs),
+    ):
+        assert not references_user_code(builtin), builtin
 
 
 class _UserCallable:
     def __call__(self, x):
         return x * 2
-
-
-def test_callable_instances_from_user_code_count_as_user_code():
-    from xdflow.composite import Pipeline
-    from xdflow.transforms.basic_transforms import FunctionTransform
-    from xdflow.utils.cache_utils import _get_object_params, watch_user_code
-
-    with watch_user_code() as user_code:
-        _get_object_params(Pipeline("p", [("f", FunctionTransform(_UserCallable()))]))
-    assert user_code.seen
