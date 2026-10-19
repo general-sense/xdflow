@@ -111,7 +111,7 @@ from sklearn.model_selection import GroupKFold
 from xdflow import SplitterValidator, Tuner
 
 data = xdflow.from_numpy(X, y=y, subject=subject_ids)  # target and groups as named trial coordinates
-result = xdflow.evaluate(model, data, "y", groups="subject")
+result = xdflow.evaluate(model, data, "y", groups="subject", cv=GroupKFold(5))  # the split the tuner uses
 tuner = Tuner(
     pipelines_to_tune=result.pipeline,
     cv_strategy=SplitterValidator(GroupKFold(5), group_coord="subject", scoring="accuracy", verbose=False),
@@ -147,7 +147,9 @@ identical samples   10299          0/5
 ```
 
 Coordinates are recognised by name (`subject`, `subject_id`, `participant`, `session`, `run`, `block`,
-`segment`, `orig_trial`...); pass `groups=` to audit any other. Session-like coordinates are compared within
+`segment`, and for windows cut from longer trials `orig_trial`, `epoch_id`, `trial_id`...); pass `groups=` to
+audit any other. Windows that partly overlap are not exact copies, so they are found only through the trial
+they were cut from. Session-like coordinates are compared within
 subject, since session numbers usually restart for every subject. A validator that has run
 `cross_validate` can be audited too: `check_split(data, validator)`.
 
