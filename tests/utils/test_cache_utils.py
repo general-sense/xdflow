@@ -402,3 +402,18 @@ def test_keys_that_will_not_be_used_are_not_computed(monkeypatch):
     data = DataContainer(xr.DataArray(np.ones((4, 2)), dims=("trial", "feature")))
     Pipeline("p", [("double", double())], use_cache=True).fit_transform(data)
     assert calls == []
+
+
+class _UserCallable:
+    def __call__(self, x):
+        return x * 2
+
+
+def test_callable_instances_from_user_code_count_as_user_code():
+    from xdflow.composite import Pipeline
+    from xdflow.transforms.basic_transforms import FunctionTransform
+    from xdflow.utils.cache_utils import _get_object_params, watch_user_code
+
+    with watch_user_code() as user_code:
+        _get_object_params(Pipeline("p", [("f", FunctionTransform(_UserCallable()))]))
+    assert user_code.seen

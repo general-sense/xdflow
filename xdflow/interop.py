@@ -3,7 +3,6 @@
 from typing import Any
 
 import numpy as np
-import pandas as pd
 import xarray as xr
 
 from xdflow.core.data_container import DataContainer
@@ -139,26 +138,26 @@ def _as_container(
                 "dims only applies to NumPy input; DataArray, DataContainer and Epochs name their own dims."
             )
         data = X.data if isinstance(X, DataContainer) else X if isinstance(X, xr.DataArray) else from_mne_epochs(X).data
+        own_trial_labels = True
     else:
         data = from_numpy(X, dims).data
+        own_trial_labels = False
     if "trial" not in data.dims:
         raise ValueError(f"Data needs a 'trial' dim holding the samples; got dims {data.dims}.")
     new_coords: dict[str, Any] = {}
     if metadata is not None:
         if len(metadata) != data.sizes["trial"]:
             raise ValueError(f"metadata has {len(metadata)} rows for {data.sizes['trial']} trials.")
-        # Rows are matched by position, as in scikit-learn, unless the data has its own trial labels (not just
-        # positions 0, 1, 2...) and the metadata is indexed by exactly those labels: then they are matched by label.
-        trials = data.indexes.get("trial")
+        # Rows are matched to trials by position, as in scikit-learn. Metadata indexed by the data's own trial labels
+        # in another order could mean either rows by label or rows by position: refuse rather than guess.
+        trials = data.indexes.get("trial") if own_trial_labels else None
         index = metadata.index
-        if (
-            trials is not None
-            and not trials.equals(pd.RangeIndex(len(trials)))
-            and not isinstance(index, pd.RangeIndex)
-            and index.is_unique
-            and set(index) == set(trials)
-        ):
-            metadata = metadata.loc[trials]
+        if trials is not None and index.is_unique and set(index) == set(trials) and not index.equals(trials):
+            raise ValueError(
+                "metadata is indexed by the trial labels, in another order than the data's trials. Reorder it "
+                "(metadata.loc[data.trial.values]), or drop its index (metadata.reset_index(drop=True)) if its rows "
+                "already follow the data."
+            )
         new_coords.update({str(column): metadata[column].to_numpy() for column in metadata.columns})
         given_twice = sorted(set(new_coords) & set(trial_coords))
         if given_twice:

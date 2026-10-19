@@ -291,7 +291,8 @@ def test_summary_mean_is_the_mean_of_fold_scores(model, X, y):
     assert repr(result).startswith(f"{result.metric} {np.mean(result.fold_scores):.3f} ±")
 
 
-def test_metadata_indexed_by_trial_label_is_aligned_to_the_data():
+def test_metadata_indexed_by_the_trial_labels_in_another_order_is_refused():
+    """Position or label? Either reading is plausible, so the rows must be put in the data's order first."""
     rng = np.random.default_rng(0)
     trials = rng.permutation(60) + 1000
     data = xr.DataArray(
@@ -300,9 +301,14 @@ def test_metadata_indexed_by_trial_label_is_aligned_to_the_data():
         coords={"trial": trials, "label": ("trial", np.array(["a", "b"])[np.arange(60) % 2])},
     )
     info = pd.DataFrame({"subject": np.repeat(np.arange(6), 10)}, index=np.sort(trials))
-    result = evaluate(LogisticRegression(), data, groups="subject", metadata=info, cv=3)
+    with pytest.raises(ValueError, match="order"):
+        evaluate(LogisticRegression(), data, groups="subject", metadata=info, cv=3)
+    result = evaluate(LogisticRegression(), data, groups="subject", metadata=info.loc[trials], cv=3)
     got = result.predictions.set_index("trial")["subject"].loc[info.index]
     np.testing.assert_array_equal(got.to_numpy(), info["subject"].to_numpy())
+    with pytest.raises(ValueError, match="order"):  # reordered positional labels: also ambiguous
+        reordered = data.assign_coords(trial=np.arange(60)).isel(trial=rng.permutation(60))
+        evaluate(LogisticRegression(), reordered, groups="subject", metadata=info.set_axis(np.arange(60)), cv=3)
 
 
 def test_a_negated_scorer_is_named_like_scikit_learn():
@@ -337,3 +343,8 @@ def test_metadata_rows_match_numpy_rows_by_position(model, X, y):
     np.testing.assert_array_equal(
         result.predictions.sort_values("trial")["subject"].to_numpy(), shuffled["subject"].to_numpy()
     )
+
+
+def test_validator_hint_names_a_group_splitter(model, X, y, info):
+    with pytest.warns(UserWarning, match="GroupKFold"):
+        evaluate(model, X, y, metadata=info, cv=KFoldValidator(n_splits=3, verbose=False))

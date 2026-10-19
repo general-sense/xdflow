@@ -224,7 +224,8 @@ def evaluate(
         if splittable:
             finding = split.findings[split.shared_coords.index(splittable[0])]
             hint = (
-                f" Give the validator group_coord='{splittable[0]}'"
+                f" Use a validator that keeps each {splittable[0]} on one side, e.g. "
+                f"SplitterValidator(GroupKFold(5), group_coord='{splittable[0]}'),"
                 if isinstance(cv, CrossValidator)
                 else f" Pass groups='{splittable[0]}'"
             ) + f" to score on new {splittable[0]} values instead."

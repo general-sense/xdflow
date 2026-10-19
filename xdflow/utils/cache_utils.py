@@ -429,6 +429,8 @@ def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
                 _note_user_code()
                 meta["globals"] = _referenced_globals_metadata(fn, code)
         elif not isinstance(fn, type):
+            if _is_user_code(type(fn)):  # its __call__ may read code the key cannot see
+                _note_user_code()
             # Callable instance (ufunc, operator.methodcaller, object with __call__): hash its pickled state,
             # which covers __slots__ and C-level configuration; fall back to public attributes.
             try:
