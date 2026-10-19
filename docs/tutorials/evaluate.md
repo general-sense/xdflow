@@ -92,6 +92,7 @@ and R² for regressors).
 - `result.fit_final()`: the pipeline refit on all trials; its `predict` needs no labels. It takes a
   container, like every xdflow pipeline: `final.predict(xdflow.from_numpy(X_new)).data.values` for NumPy
   arrays (with the same `dims` as in `evaluate`), `xdflow.from_mne_epochs(epochs)` for MNE `Epochs`.
+  Predictions carry their `trial` coordinate; if one of your steps reorders trials, match rows by `trial`.
 
 ## xdflow steps in front of your model
 
