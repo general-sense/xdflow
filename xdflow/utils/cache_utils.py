@@ -12,6 +12,7 @@ import json
 import os
 import pickle
 import shutil
+import sysconfig
 import threading
 import time
 import warnings
@@ -366,7 +367,6 @@ def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
         code = getattr(fn, "__code__", None)
         if code is not None:
             # Lambdas and closures share a qualname, so also hash the code, defaults and captured values.
-            # shortcut: module-level globals the function reads are not hashed; edits are covered by module_hash.
             cells = []
             for cell in fn.__closure__ or ():  # type: ignore[attr-defined]
                 try:
@@ -377,6 +377,8 @@ def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
             meta["defaults"] = _get_object_metadata(list(fn.__defaults__ or ()))  # type: ignore[attr-defined]
             meta["kwdefaults"] = _get_object_metadata(dict(fn.__kwdefaults__ or {}))  # type: ignore[attr-defined]
             meta["closure"] = _get_object_metadata(cells)
+            if _is_user_code(fn):
+                meta["globals"] = _referenced_globals_metadata(fn, code)
         elif not isinstance(fn, type):
             # Callable instance (ufunc, operator.methodcaller, object with __call__): hash its pickled state,
             # which covers __slots__ and C-level configuration; fall back to public attributes.
@@ -393,6 +395,48 @@ def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
         return meta
     finally:
         in_progress.discard(id(fn))
+
+
+# Installed packages, the standard library and xdflow change only with their version; their module hash covers them.
+_LIBRARY_DIRS = tuple(
+    {str(Path(sysconfig.get_paths()[key]).resolve()) for key in ("stdlib", "platstdlib", "purelib", "platlib")}
+    | {str(Path(__file__).resolve().parents[1])}
+)
+
+
+def _is_user_code(obj: Any) -> bool:
+    """Defined in code users edit: a script, their own modules or a notebook (no source file)."""
+    module = obj if inspect.ismodule(obj) else inspect.getmodule(obj)
+    source = getattr(module, "__file__", None)
+    return source is None or not str(Path(source).resolve()).startswith(_LIBRARY_DIRS)
+
+
+def _referenced_globals_metadata(fn: Callable, code: Any) -> dict[str, Any]:
+    """Globals a function reads: helper functions (recursively), constants, and other modules by source, so that
+    editing them changes the key. module_hash alone misses other modules and notebook cells (no source file).
+    shortcut: classes are keyed by their module's source, so a class redefined in a notebook is not seen."""
+    names: set[str] = set()
+    codes = [code]
+    while codes:  # nested functions and comprehensions read globals too
+        current = codes.pop()
+        names.update(current.co_names)
+        codes.extend(const for const in current.co_consts if inspect.iscode(const))
+    namespace = getattr(fn, "__globals__", {})
+    meta: dict[str, Any] = {}
+    for name in sorted(names & namespace.keys()):
+        value = namespace[name]
+        try:
+            if inspect.ismodule(value):
+                source = getattr(value, "__file__", None)
+                user_module = source is not None and _is_user_code(value)
+                meta[name] = hashlib.md5(Path(source).read_bytes()).hexdigest() if user_module else value.__name__
+            elif isinstance(value, type):
+                meta[name] = {"class": value.__qualname__, "module_hash": _get_module_hash_from_obj(value)}
+            else:
+                meta[name] = _get_object_metadata(value)
+        except Exception:  # e.g. an unreadable module file: key the name only
+            meta[name] = type(value).__qualname__
+    return meta
 
 
 def _get_object_with_dict_metadata(obj: Any) -> dict[str, Any]:

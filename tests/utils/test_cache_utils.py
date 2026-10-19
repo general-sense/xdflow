@@ -203,3 +203,41 @@ def test_unpicklable_pipeline_output_runs_without_the_output_cache():
     with pytest.warns(UserWarning, match="cannot be pickled"):
         out = pipeline.fit_transform(data)
     np.testing.assert_array_equal(out.data.values, 2.0)
+
+
+_SCALE = 1.0
+
+
+def _helper(x):
+    return x + 1
+
+
+def _reads_globals(x):
+    return _helper(x) * _SCALE
+
+
+def test_cache_key_follows_globals_and_helpers_a_function_reads(monkeypatch, tmp_path):
+    """Editing a helper, a constant or another module a step calls must change the key (notebooks, imports)."""
+    import importlib
+    import sys
+
+    from xdflow.utils.cache_utils import _get_callable_metadata
+
+    def key(fn):
+        return hash_dict(_get_callable_metadata(fn))
+
+    base = key(_reads_globals)
+    monkeypatch.setattr(sys.modules[__name__], "_SCALE", 2.0)
+    assert key(_reads_globals) != base
+    scaled = key(_reads_globals)
+    monkeypatch.setattr(sys.modules[__name__], "_helper", lambda x: x - 1)
+    assert key(_reads_globals) != scaled
+
+    (tmp_path / "helpers_mod.py").write_text("def center(x):\n    return x.mean()\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    helpers_mod = importlib.import_module("helpers_mod")
+    namespace = {"helpers_mod": helpers_mod}
+    exec("def fit(x):\n    return helpers_mod.center(x)\n", namespace)
+    before = key(namespace["fit"])
+    (tmp_path / "helpers_mod.py").write_text("def center(x):\n    return x.max()\n")
+    assert key(namespace["fit"]) != before
