@@ -16,9 +16,11 @@ import shutil
 import sysconfig
 import threading
 import time
+import types
 import uuid
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -220,19 +222,24 @@ def cache_result(
 
             # Verbosity does not change results, so it must not change the key
             key_kwargs = {k: v for k, v in kwargs.items() if k != "verbose"}
-            if key_gen_func and instance:
-                key_dict = key_gen_func(func, *args, **key_kwargs)
-            else:
-                # Get arguments of function
-                bound_args = inspect.signature(func).bind(*args, **key_kwargs)
-                bound_args.apply_defaults()
-                key_dict = {
-                    k: _get_object_metadata(v) for k, v in bound_args.arguments.items() if k != "self" or not instance
-                }
-                if instance:
-                    # Make sure the class instance is the same
-                    key_dict["config"] = _get_object_params(instance)
-                    key_dict["module_hash"] = _get_module_hash_from_obj(instance)
+            with watch_user_code() as user_code:
+                if key_gen_func and instance:
+                    key_dict = key_gen_func(func, *args, **key_kwargs)
+                else:
+                    # Get arguments of function
+                    bound_args = inspect.signature(func).bind(*args, **key_kwargs)
+                    bound_args.apply_defaults()
+                    key_dict = {
+                        k: _get_object_metadata(v)
+                        for k, v in bound_args.arguments.items()
+                        if k != "self" or not instance
+                    }
+                    if instance:
+                        # Make sure the class instance is the same
+                        key_dict["config"] = _get_object_params(instance)
+                        key_dict["module_hash"] = _get_module_hash_from_obj(instance)
+            if user_code.seen and not cache_user_code():
+                return func(*args, **kwargs)
 
             cache_key = hash_dict(key_dict)
             cache_path = _get_cache_dir(prefix) / f"{cache_key}.pkl"
@@ -346,6 +353,30 @@ def _is_plain_callable(obj: Any) -> bool:
 
 
 _callables_in_progress = threading.local()
+_user_code_in_key = threading.local()
+
+
+def cache_user_code() -> bool:
+    """Whether results that depend on functions from user code may be cached on disk (``XDFLOW_CACHE_USER_CODE=1``).
+
+    Off by default: a key covers a function's code, parameters, the globals it reads and the source of the
+    modules they come from, but not everything it can depend on (attributes of a submodule, methods of a class,
+    values changed at runtime, eval). Turn it on when your functions depend only on those.
+    """
+    return os.environ.get("XDFLOW_CACHE_USER_CODE", "").strip().lower() in {"1", "true", "yes"}
+
+
+@contextmanager
+def watch_user_code() -> Iterator[Any]:
+    """Note whether the cache keys built inside the block fingerprint a function from user code."""
+    outer = getattr(_user_code_in_key, "seen", None)
+    _user_code_in_key.seen = False
+    watched = types.SimpleNamespace(seen=False)
+    try:
+        yield watched
+    finally:
+        watched.seen = _user_code_in_key.seen
+        _user_code_in_key.seen = None if outer is None else outer or watched.seen
 
 
 def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
@@ -380,6 +411,8 @@ def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
             meta["kwdefaults"] = _get_object_metadata(dict(fn.__kwdefaults__ or {}))  # type: ignore[attr-defined]
             meta["closure"] = _get_object_metadata(cells)
             if _is_user_code(fn):
+                if getattr(_user_code_in_key, "seen", None) is not None:
+                    _user_code_in_key.seen = True
                 meta["globals"] = _referenced_globals_metadata(fn, code)
         elif not isinstance(fn, type):
             # Callable instance (ufunc, operator.methodcaller, object with __call__): hash its pickled state,

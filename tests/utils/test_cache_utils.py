@@ -158,8 +158,9 @@ def test_cache_key_sees_attrs_but_not_data_history():
     assert hash_dict({"x": DataContainer(with_history)}) == key
 
 
-def test_unpicklable_fold_pipeline_runs_without_the_fit_cache():
+def test_unpicklable_fold_pipeline_runs_without_the_fit_cache(monkeypatch):
     """A lambda after the first stateful step cannot be pickled; CV must still run, just uncached."""
+    monkeypatch.setenv("XDFLOW_CACHE_USER_CODE", "1")  # user code is not cached otherwise
     import pytest
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
@@ -191,8 +192,9 @@ def test_unpicklable_fold_pipeline_runs_without_the_fit_cache():
     assert len(validator.cv_scores_) == 3
 
 
-def test_unpicklable_pipeline_output_runs_without_the_output_cache():
+def test_unpicklable_pipeline_output_runs_without_the_output_cache(monkeypatch):
     """A lambda step's output records the lambda in its history; the cached pipeline must still run."""
+    monkeypatch.setenv("XDFLOW_CACHE_USER_CODE", "1")  # user code is not cached otherwise
     import pytest
 
     from xdflow.composite import Pipeline
@@ -308,3 +310,50 @@ def test_a_global_that_cannot_be_fingerprinted_never_reuses_a_key():
     assert hash_dict(_get_callable_metadata(namespace["cyclic"])) != hash_dict(
         _get_callable_metadata(namespace["cyclic"])
     )
+
+
+def test_results_of_user_functions_are_not_cached_on_disk_unless_allowed(monkeypatch):
+    """xdflow cannot see every code a user's function depends on, so its results are recomputed by default."""
+    import os
+    from pathlib import Path
+
+    from sklearn.linear_model import LogisticRegression
+
+    from xdflow import KFoldValidator
+    from xdflow.composite import Pipeline
+    from xdflow.transforms.function_step import step
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    @step
+    def double(data):
+        return data * 2
+
+    def means(data):
+        return data.mean("trial")
+
+    @step(fit=means)
+    def center(data, state):
+        return data - state
+
+    rng = np.random.default_rng(0)
+    data = DataContainer(
+        xr.DataArray(
+            rng.normal(size=(30, 4)),
+            dims=("trial", "feature"),
+            coords={"trial": np.arange(30), "label": ("trial", np.arange(30) % 2)},
+        )
+    )
+    cache_dir = Path(os.environ["XDFLOW_CACHE_DIR"])
+
+    def run():
+        Pipeline("p", [("double", double())], use_cache=True).fit_transform(data)
+        validator = KFoldValidator(n_splits=3, verbose=False, use_stateful_fit_cache=True)
+        predictor = SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label")
+        validator.set_pipeline(Pipeline("q", [("center", center()), ("lr", predictor)]))
+        validator.cross_validate(data)
+        return len(list(cache_dir.rglob("*.pkl")))
+
+    monkeypatch.delenv("XDFLOW_CACHE_USER_CODE", raising=False)
+    assert run() == 0
+    monkeypatch.setenv("XDFLOW_CACHE_USER_CODE", "1")
+    assert run() > 0
