@@ -112,3 +112,27 @@ def test_the_tuners_seed_reaches_an_unfitted_group_apply_template():
     Tuner._inject_random_seeds_into_pipelines(SimpleNamespace(pipelines_to_tune={"p": group_apply}, random_seed=123))
 
     assert group_apply.clone().transform_template.estimator.random_state == 123
+
+
+def test_the_first_trial_uses_a_wrapped_scikit_learn_pipelines_own_values():
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import GroupKFold
+    from sklearn.pipeline import make_pipeline as sklearn_make_pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    import xdflow
+    from xdflow import SplitterValidator
+
+    rng = np.random.default_rng(0)
+    data = xdflow.from_numpy(rng.normal(size=(60, 3)), y=np.arange(60) % 2, subject=np.repeat(np.arange(6), 10))
+    model = sklearn_make_pipeline(StandardScaler(), LogisticRegression(C=0.5))
+    result = xdflow.evaluate(model, data, "y", groups="subject", cv=GroupKFold(3))
+    tuner = Tuner(
+        pipelines_to_tune=result.pipeline,
+        cv_strategy=SplitterValidator(GroupKFold(3), group_coord="subject", scoring="accuracy", verbose=False),
+        param_grid={"model": {"pipeline": {"logisticregression__C": ("log", 1e-3, 10.0)}}},
+        initial_data_container=data,
+        verbose=0,
+    )
+    tuner.tune(n_trials=1)
+    assert tuner.study.trials[0].params["model__pipeline__logisticregression__C"] == 0.5

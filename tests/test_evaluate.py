@@ -289,3 +289,51 @@ def test_summary_mean_is_the_mean_of_fold_scores(model, X, y):
     validator = KFoldValidator(n_splits=7, verbose=False, pooling_score_weight=1.0, scoring="accuracy")
     result = evaluate(model, X, y, cv=validator)
     assert repr(result).startswith(f"{result.metric} {np.mean(result.fold_scores):.3f} ±")
+
+
+def test_metadata_indexed_by_trial_label_is_aligned_to_the_data():
+    rng = np.random.default_rng(0)
+    trials = rng.permutation(60) + 1000
+    data = xr.DataArray(
+        rng.normal(size=(60, 3)),
+        dims=("trial", "feature"),
+        coords={"trial": trials, "label": ("trial", np.array(["a", "b"])[np.arange(60) % 2])},
+    )
+    info = pd.DataFrame({"subject": np.repeat(np.arange(6), 10)}, index=np.sort(trials))
+    result = evaluate(LogisticRegression(), data, groups="subject", metadata=info, cv=3)
+    got = result.predictions.set_index("trial")["subject"].loc[info.index]
+    np.testing.assert_array_equal(got.to_numpy(), info["subject"].to_numpy())
+
+
+def test_a_negated_scorer_is_named_like_scikit_learn():
+    from sklearn.metrics import get_scorer
+
+    X, y = np.random.default_rng(0).normal(size=(60, 3)), np.arange(60.0)
+    result = evaluate(Ridge(), X, y, cv=3, scoring=get_scorer("neg_mean_squared_error"))
+    assert result.metric == "neg_mean_squared_error"
+
+
+def test_by_keeps_trials_with_a_missing_value(model, X, y):
+    condition = np.array(["A", "B", None], dtype=object)[np.arange(120) % 3]
+    result = evaluate(model, X, y, cv=3, metadata=pd.DataFrame({"condition": condition}))
+    assert result.by("condition")["n_trials"].sum() == 120
+
+
+def test_summary_counts_trials_once_when_test_sets_overlap(model, X, y):
+    from sklearn.model_selection import ShuffleSplit
+
+    result = evaluate(model, X, y, cv=ShuffleSplit(10, test_size=0.5, random_state=0))
+    assert "120 trials, 600 predictions" in repr(result)
+
+
+def test_y_given_twice_is_refused(model, X, y):
+    with pytest.raises(ValueError, match="both"):
+        evaluate(model, X, y, cv=3, metadata=pd.DataFrame({"y": y}))
+
+
+def test_metadata_rows_match_numpy_rows_by_position(model, X, y):
+    shuffled = pd.DataFrame({"subject": np.repeat(np.arange(6), 20), "y": y}).sample(frac=1, random_state=0)
+    result = evaluate(model, X, shuffled["y"].to_numpy(), groups="subject", metadata=shuffled[["subject"]], cv=3)
+    np.testing.assert_array_equal(
+        result.predictions.sort_values("trial")["subject"].to_numpy(), shuffled["subject"].to_numpy()
+    )

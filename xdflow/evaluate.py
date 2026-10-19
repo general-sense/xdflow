@@ -62,7 +62,7 @@ class EvaluationResult:
         if needs_proba or self.validator._scoring_accepts_container:
             raise ValueError(f"by() needs a metric computed from predicted labels; '{metric}' is not.")
         rows = []
-        for value, group in self.predictions.groupby(coord, sort=True):
+        for value, group in self.predictions.groupby(coord, sort=True, dropna=False):
             y_true, y_pred = np.stack(group["y_true"].to_numpy()), np.stack(group["y_pred"].to_numpy())
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -83,9 +83,14 @@ class EvaluationResult:
         stateless, stateful = self.validator._auto_detect_pipeline_parts(self.pipeline)
         once = ", ".join(_label(s) for s in stateless.steps) if stateless is not None else "nothing"
         per_fold = ", ".join(_label(s) for s in stateful.steps) if stateful is not None else "nothing"
+        # Test sets may overlap (ShuffleSplit): count trials once.
+        n_trials = self.predictions["trial"].nunique() if "trial" in self.predictions else len(self.predictions)
+        scored = f"{n_trials} trials" + (
+            f", {len(self.predictions)} predictions" if n_trials < len(self.predictions) else ""
+        )
         lines = [
             f"{self.metric} {np.mean(self.fold_scores):.3f} ± {np.std(self.fold_scores):.3f} "
-            f"(mean ± sd over {len(self.fold_scores)} folds, {len(self.predictions)} trials)",
+            f"(mean ± sd over {len(self.fold_scores)} folds, {scored})",
             f"Split: {self.cv_description}",
             f"Computed once: {once}. Refit in each fold: {per_fold}.",
         ]
@@ -187,6 +192,8 @@ def evaluate(
     metric: str | None = scoring if isinstance(scoring, str) else getattr(scoring, "__name__", None)
     if is_scorer:
         metric = getattr(getattr(scoring, "_score_func", None), "__name__", "custom")
+        if getattr(scoring, "_sign", 1) < 0:  # greater_is_better=False: scores are negated, as in "neg_..." names
+            metric = f"neg_{metric}"
     if isinstance(cv, CrossValidator):
         metric = None  # the validator's own scoring applies (passing scoring as well is rejected below)
     elif scoring is None and isinstance(target, str):
@@ -215,7 +222,11 @@ def evaluate(
         splittable = [name for name in split.shared_coords if name in grouping_coords(data, min_values=2)]
         if splittable:
             finding = split.findings[split.shared_coords.index(splittable[0])]
-            hint = f" Pass groups='{splittable[0]}' to score on new {splittable[0]} values instead."
+            hint = (
+                f" Give the validator group_coord='{splittable[0]}'"
+                if isinstance(cv, CrossValidator)
+                else f" Pass groups='{splittable[0]}'"
+            ) + f" to score on new {splittable[0]} values instead."
             warnings.warn(finding + hint, UserWarning, stacklevel=2)
 
     predictions = _predictions_frame(validator)

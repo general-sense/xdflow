@@ -955,7 +955,8 @@ class Tuner:
             target_transform: Any, param_grid: dict[str, Any], namespace: str, initial_params: dict[str, Any]
         ):
             for param_name, space in param_grid.items():
-                current_value = target_transform.get_params(deep=False).get(param_name)
+                # deep: nested estimator parameters such as "logisticregression__C" of a wrapped sklearn Pipeline
+                current_value = target_transform.get_params(deep=True).get(param_name)
 
                 # If current_value is None, it means the parameter wasn't explicitly initialized.
                 # In this case, skip enqueueing it and let Optuna sample it.

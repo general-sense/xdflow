@@ -3,6 +3,7 @@
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 
 from xdflow.core.data_container import DataContainer
@@ -146,7 +147,22 @@ def _as_container(
     if metadata is not None:
         if len(metadata) != data.sizes["trial"]:
             raise ValueError(f"metadata has {len(metadata)} rows for {data.sizes['trial']} trials.")
+        # Rows are matched by position, as in scikit-learn, unless the data has its own trial labels (not just
+        # positions 0, 1, 2...) and the metadata is indexed by exactly those labels: then they are matched by label.
+        trials = data.indexes.get("trial")
+        index = metadata.index
+        if (
+            trials is not None
+            and not trials.equals(pd.RangeIndex(len(trials)))
+            and not isinstance(index, pd.RangeIndex)
+            and index.is_unique
+            and set(index) == set(trials)
+        ):
+            metadata = metadata.loc[trials]
         new_coords.update({str(column): metadata[column].to_numpy() for column in metadata.columns})
+        given_twice = sorted(set(new_coords) & set(trial_coords))
+        if given_twice:
+            raise ValueError(f"{given_twice} are given both as metadata columns and as arguments; pass them once.")
     new_coords.update(trial_coords)
     clashes = sorted(set(new_coords) & set(data.coords))
     if clashes:
