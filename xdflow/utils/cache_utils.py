@@ -5,6 +5,7 @@ This module provides functions for caching and retrieving preprocessed and featu
 based on input parameters. It uses a hash of the input parameters to create unique cache keys.
 """
 
+import enum
 import functools
 import hashlib
 import inspect
@@ -306,9 +307,9 @@ def _get_series_metadata(s: pd.Series) -> dict[str, Any]:
 
 
 def _get_dict_metadata(d: dict[Any, Any]) -> dict[str, Any]:
-    """Build a deterministic signature for a dictionary."""
-    keys_sorted = sorted(d.keys(), key=lambda x: str(x))
-    return {"length": len(d), "items": tuple((str(k), _get_object_metadata(d[k])) for k in keys_sorted)}
+    """Build a deterministic signature for a dictionary: keys with their types, in insertion order (code may
+    iterate over it)."""
+    return {"length": len(d), "items": tuple((type(k).__name__, str(k), _get_object_metadata(v)) for k, v in d.items())}
 
 
 def _get_sequence_metadata(seq: Any) -> dict[str, Any]:
@@ -473,13 +474,15 @@ def _get_object_metadata(obj: Any) -> Any:
         return _get_dict_metadata(obj)
     if isinstance(obj, (list, tuple)):
         return _get_sequence_metadata(obj)
-    if isinstance(obj, set):
+    if isinstance(obj, (set, frozenset)):
         return _get_set_metadata(obj)
+    if isinstance(obj, enum.Enum):  # members keep their identity in private attributes
+        return {"enum": f"{type(obj).__module__}.{type(obj).__qualname__}.{obj.name}"}
     if callable(obj):
         return _get_callable_metadata(obj)
     if hasattr(obj, "__dict__"):
         return _get_object_with_dict_metadata(obj)
-    return {"__class__": obj.__class__.__name__, "repr": str(obj)[:128]}
+    return {"__class__": obj.__class__.__name__, "repr": str(obj)}
 
 
 def _get_object_params(obj: Any) -> Any:
@@ -501,7 +504,7 @@ def _get_object_params(obj: Any) -> Any:
     if not hasattr(obj, "__dict__"):
         if isinstance(obj, (list, tuple)):
             return [_get_object_params(item) for item in obj]
-        return str(obj)
+        return _get_object_metadata(obj)
 
     params = {}
     # Get class name for type identification
@@ -521,6 +524,8 @@ def _get_object_params(obj: Any) -> Any:
             continue
         if _is_plain_callable(value):
             params[key] = _get_callable_metadata(value)
+        elif isinstance(value, enum.Enum):
+            params[key] = _get_object_metadata(value)
         elif hasattr(value, "__dict__"):
             # Recursively get parameters of nested objects
             params[key] = _get_object_params(value)
@@ -529,7 +534,7 @@ def _get_object_params(obj: Any) -> Any:
         elif isinstance(value, np.ndarray):
             params[key] = joblib.hash(value)  # str() truncates large arrays
         else:
-            params[key] = str(value)
+            params[key] = _get_object_metadata(value)  # by content: str() truncates arrays inside dicts
 
     return params
 

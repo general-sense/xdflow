@@ -241,3 +241,34 @@ def test_cache_key_follows_globals_and_helpers_a_function_reads(monkeypatch, tmp
     before = key(namespace["fit"])
     (tmp_path / "helpers_mod.py").write_text("def center(x):\n    return x.max()\n")
     assert key(namespace["fit"]) != before
+
+
+def test_cache_key_sees_the_contents_of_container_parameters_and_globals():
+    """Dict parameters (with large arrays), dict key types and order, frozensets and enums all reach the key."""
+    from enum import Enum
+
+    from xdflow.transforms.function_step import step
+    from xdflow.utils.cache_utils import _get_object_metadata, _get_object_params
+
+    @step
+    def shift(data, config):
+        return data + config["offsets"][500]
+
+    weights = np.zeros(2000)
+    transform = shift({"offsets": weights})
+    before = hash_dict(_get_object_params(transform))
+    weights[500] = 9.0
+    assert hash_dict(_get_object_params(transform)) != before
+
+    class Mode(Enum):
+        ADD = 1
+        MULTIPLY = 2
+
+    def key(value):
+        return hash_dict({"value": _get_object_metadata(value)})
+
+    assert key({1: 2}) != key({"1": 2})
+    assert key({"a": 1, "b": 2}) != key({"b": 2, "a": 1})
+    assert key(frozenset(range(100))) != key(frozenset(range(101)))
+    assert key(Mode.ADD) != key(Mode.MULTIPLY)
+    assert hash_dict(_get_object_params(shift(Mode.ADD))) != hash_dict(_get_object_params(shift(Mode.MULTIPLY)))
