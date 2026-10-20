@@ -228,7 +228,7 @@ def audit_splits(
                 examples.extend(sorted(map(str, shared))[: 3 - len(examples)])
         label = f"{name} (within {', '.join(parents)})" if scoped else name
         # Missing ids (NaN, None) never compare equal, so trials without one cannot be shown to be apart.
-        audited_trials = np.unique(np.concatenate([np.concatenate(pair) for pair in split_trials]))
+        audited_trials = pd.unique(np.concatenate([np.concatenate(pair) for pair in split_trials]))
         n_missing = int(pd.isna(np.asarray(data.coords[name].values)[trial_position.get_indexer(audited_trials)]).sum())
         if n_missing:
             findings.append(

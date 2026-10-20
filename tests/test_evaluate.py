@@ -491,3 +491,46 @@ def test_windows_of_one_trial_stay_together_with_integer_labels():
     assert "orig_trial kept together" in result.cv_description
     folds = result.predictions.groupby("orig_trial")["fold"].nunique()
     assert (folds == 1).all()
+
+
+@pytest.mark.parametrize("name", ["voting", "bagging", "ovr", "calibrated", "grid", "unused_key", "constant_array"])
+def test_meta_estimators_score_like_scikit_learn(name):
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.dummy import DummyClassifier
+    from sklearn.ensemble import BaggingClassifier, VotingClassifier
+    from sklearn.model_selection import GridSearchCV, StratifiedKFold
+    from sklearn.multiclass import OneVsRestClassifier
+
+    X = np.random.default_rng(1).normal(size=(90, 3))
+    y = np.tile([1, 2, 3], 30)
+    X[:, 0] += 0.5 * y
+    model = {
+        "voting": VotingClassifier([("a", LogisticRegression(class_weight={1: 10})), ("b", LogisticRegression())]),
+        "bagging": BaggingClassifier(LogisticRegression(class_weight={1: 10}), n_estimators=3, random_state=0),
+        "ovr": OneVsRestClassifier(LogisticRegression(class_weight={1: 10})),
+        "calibrated": CalibratedClassifierCV(LogisticRegression(class_weight={2: 10}), cv=2, ensemble=False),
+        "grid": GridSearchCV(LogisticRegression(), {"class_weight": [{2: 10}]}, cv=2),
+        "unused_key": LogisticRegression(class_weight={1: 1, 2: 1, 3: 1, 0: 10}),
+        "constant_array": DummyClassifier(strategy="constant", constant=[2]),
+    }[name]
+    cv = StratifiedKFold(3)
+    expected = cross_val_score(model, X, y, cv=cv, scoring="accuracy")
+    np.testing.assert_allclose(evaluate(model, X, y, cv=cv).fold_scores, expected)
+
+
+def test_epochs_metadata_series_is_matched_by_position():
+    mne = pytest.importorskip("mne")
+
+    info = mne.create_info(["C3", "C4"], 100.0, "eeg")
+    events = np.c_[np.arange(6) * 100, np.zeros(6, int), np.ones(6, int)]
+    epochs = mne.EpochsArray(
+        np.random.default_rng(0).normal(size=(6, 2, 50)),
+        info,
+        events=events,
+        metadata=pd.DataFrame({"target": [0, 1, 0, 1, 0, 1]}),
+        verbose=False,
+    )[[2, 0, 1, 5, 3, 4]]
+    from xdflow.interop import _as_container
+
+    container = _as_container(epochs, y=epochs.metadata["target"])
+    np.testing.assert_array_equal(container.data.y.values, epochs.metadata["target"].to_numpy())

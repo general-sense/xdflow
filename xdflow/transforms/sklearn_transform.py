@@ -171,10 +171,20 @@ class SKLearnTransform(Transform, SampleWeightMixin):
         if fit_dims is not None:
             extra = [dim for dim in data.dims if dim not in fit_dims and data.sizes[dim] == 1]
             data = data.squeeze(extra, drop=True) if extra else data  # a size-1 dim absent at fit holds nothing
-            if set(data.dims) == set(fit_dims) and data.dims != fit_dims:
+            if set(data.dims) != set(fit_dims):
+                raise ValueError(
+                    f"{type(self).__name__} was fitted on dims {fit_dims}; this data has dims {data.dims}."
+                )
+            if data.dims != fit_dims:
                 data = data.transpose(*fit_dims)  # N-D estimators read axes by position, like features
         for dim, fitted in getattr(self, "_fit_labels", {}).items():
-            if dim not in data.indexes or data.indexes[dim].equals(fitted):
+            if dim not in data.indexes:
+                if dim in data.dims:  # labels seen at fit, none now: positions cannot be checked
+                    raise ValueError(
+                        f"{type(self).__name__} was fitted with '{dim}' labels, but this data has none for '{dim}'."
+                    )
+                continue
+            if data.indexes[dim].equals(fitted):
                 continue
             positions = data.indexes[dim].get_indexer(fitted)
             if (positions < 0).any():
@@ -642,7 +652,15 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
 
         if self.is_multilabel:
             if isinstance(raw_probabilities, list):
-                probabilities = np.column_stack([p[:, 1] if p.shape[1] == 2 else p[:, -1] for p in raw_probabilities])
+                # Each target's probability of 1, found by its estimator's classes (a target trained on 0 alone has
+                # one column, for 0).
+                estimators = getattr(self.estimator, "estimators_", None)
+                probabilities = np.column_stack(
+                    [
+                        _positive_class_probability(p, estimators[i].classes_ if estimators is not None else None)
+                        for i, p in enumerate(raw_probabilities)
+                    ]
+                )
             else:
                 probabilities = raw_probabilities
             return probabilities, np.arange(probabilities.shape[1])
@@ -671,3 +689,11 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
             return (self.sample_dim, "target")
         else:
             return (self.sample_dim, "prediction")
+
+
+def _positive_class_probability(probabilities: np.ndarray, classes: Any) -> np.ndarray:
+    """Probability of class 1 from one binary target's predict_proba columns (zero if 1 was never seen)."""
+    if classes is None:
+        return probabilities[:, 1] if probabilities.shape[1] == 2 else probabilities[:, -1]
+    positive = np.flatnonzero(np.asarray(classes) == 1)
+    return probabilities[:, positive[0]] if positive.size else np.zeros(len(probabilities))

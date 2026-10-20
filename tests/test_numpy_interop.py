@@ -56,3 +56,10 @@ def test_metadata_columns_that_collide_as_text_are_refused():
 
     with pytest.raises(ValueError, match="same name"):
         from_numpy(np.zeros((4, 2)), metadata=pd.DataFrame([[0, 1]] * 4, columns=[1, "1"]))
+
+
+def test_coords_can_be_given_as_xarray_tuples():
+    from xdflow.interop import from_numpy
+
+    data = from_numpy(np.zeros((2, 3)), ("trial", "time"), coords={"time": ("time", [0, 0.01, 0.02], {"units": "s"})})
+    assert data.data.time.attrs["units"] == "s"

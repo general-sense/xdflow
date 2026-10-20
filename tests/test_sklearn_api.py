@@ -175,3 +175,41 @@ def test_new_data_with_an_extra_singleton_dim_is_aligned(X, y):
     expected = fitted.predict_proba(DataContainer(unlabeled)).data.values
     odd = unlabeled.expand_dims("band").transpose("trial", "time", "band", "channel")
     np.testing.assert_allclose(fitted.predict_proba(DataContainer(odd)).data.values, expected)
+
+
+def test_new_data_with_renamed_dims_or_dropped_labels_is_refused(X, y):
+    import xarray as xr
+    from sklearn.pipeline import make_pipeline as sk_make_pipeline
+    from sklearn.preprocessing import FunctionTransformer
+
+    from xdflow import DataContainer
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    flatten = FunctionTransformer(lambda a: a.reshape(len(a), -1))
+    predictor = SKLearnPredictor.from_estimator(
+        sk_make_pipeline(flatten, LogisticRegression()), sample_dim="trial", target_coord="label"
+    )
+    data = xr.DataArray(X, dims=DIMS, coords={**COORDS, "label": ("trial", y)})
+    fitted = make_pipeline(predictor).fit(DataContainer(data))
+    unlabeled = data.drop_vars("label")
+    with pytest.raises(ValueError, match="dims"):
+        fitted.predict(DataContainer(unlabeled.rename(time="samples")))
+    with pytest.raises(ValueError, match="channel"):
+        fitted.predict(DataContainer(unlabeled.drop_vars("channel")))
+
+
+def test_multilabel_target_seen_with_one_class_has_its_true_probability():
+    import xarray as xr
+    from sklearn.dummy import DummyClassifier
+
+    from xdflow import DataContainer
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    data = xr.DataArray(
+        np.zeros((12, 2)),
+        dims=("trial", "feature"),
+        coords={"a": ("trial", np.zeros(12, int)), "b": ("trial", np.arange(12) % 2)},
+    )
+    predictor = SKLearnPredictor(DummyClassifier, sample_dim="trial", target_coord=["a", "b"], is_multilabel=True)
+    proba = make_pipeline(predictor).fit(DataContainer(data)).predict_proba(DataContainer(data)).data.values
+    np.testing.assert_allclose(proba[0], [0.0, 0.5])

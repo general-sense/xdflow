@@ -83,4 +83,7 @@ def check_sampling_rate(data: Any, fs: float, name: str) -> None:
     else:
         return
     if not np.isclose(actual, float(fs), rtol=1e-3):
-        raise ValueError(f"{name} has fs={fs} Hz, but the data is sampled at {actual:g} Hz (from its {source}).")
+        raise ValueError(
+            f"{name} has fs={fs} Hz, but the data is sampled at {actual:g} Hz (from its {source}). If a step changed "
+            "the sampling rate, update attrs['sfreq'] (or give the time coordinate units of seconds)."
+        )

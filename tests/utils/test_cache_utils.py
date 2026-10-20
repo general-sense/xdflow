@@ -603,3 +603,26 @@ def test_validators_do_not_cache_fitted_folds_unless_asked():
         scores.append(validator.cross_validate(data))
     assert len(set(scores)) > 1  # each seed gives its own forests
     assert not list(Path(os.environ["XDFLOW_CACHE_DIR"]).rglob("*.pkl"))
+
+
+def test_direct_data_parameters_are_hashed_by_content():
+    import pandas as pd
+
+    from xdflow.transforms.basic_transforms import IdentityTransform
+    from xdflow.utils.cache_utils import _get_object_metadata, _get_object_params
+
+    def params_key(value):
+        transform = IdentityTransform()
+        transform.extra = value  # a public attribute, as a parameter would be
+        return hash_dict(_get_object_params(transform))
+
+    for first, second in (
+        (np.ma.array(np.arange(9)), np.ma.array(np.arange(9)[::-1])),
+        (pd.DataFrame({"x": [1, 2]}), pd.DataFrame({"x": [1, 3]})),
+        (pd.Series([1, 2]), pd.Series([1, 3])),
+        ([pd.Index(["a"])], [pd.Index(["b"])]),
+    ):
+        assert params_key(first) != params_key(second), type(first)
+    a = np.ma.array([1, 2], mask=[0, 1], fill_value=0)
+    b = np.ma.array([1, 2], mask=[0, 1], fill_value=99)
+    assert hash_dict({"v": _get_object_metadata(a)}) != hash_dict({"v": _get_object_metadata(b)})

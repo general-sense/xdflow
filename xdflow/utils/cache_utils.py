@@ -582,6 +582,7 @@ def _get_object_metadata(obj: Any) -> Any:
         return {
             "data": _get_ndarray_metadata(np.ma.getdata(obj)),
             "mask": _get_ndarray_metadata(np.ma.getmaskarray(obj)),
+            "fill_value": _get_object_metadata(np.asarray(obj.fill_value).tolist()),
         }
     if isinstance(obj, np.ndarray):
         return _get_ndarray_metadata(obj)
@@ -634,6 +635,8 @@ def _get_object_params(obj: Any) -> Any:
 
     if _is_plain_callable(obj):
         return _get_callable_metadata(obj)
+    if isinstance(obj, (np.ndarray, pd.DataFrame, pd.Series, xr.DataArray, *_BY_CONTENT)):
+        return _get_object_metadata(obj)  # values, not attributes (some keep a __dict__ without their values)
 
     if not hasattr(obj, "__dict__"):
         if isinstance(obj, (list, tuple)):
@@ -658,7 +661,7 @@ def _get_object_params(obj: Any) -> Any:
             continue
         if _is_plain_callable(value):
             params[key] = _get_callable_metadata(value)
-        elif isinstance(value, _BY_CONTENT):
+        elif isinstance(value, (np.ma.MaskedArray, pd.DataFrame, pd.Series, xr.DataArray, *_BY_CONTENT)):
             params[key] = _get_object_metadata(value)
         elif hasattr(value, "__dict__"):
             # Recursively get parameters of nested objects

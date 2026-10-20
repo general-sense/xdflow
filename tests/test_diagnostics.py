@@ -201,3 +201,9 @@ def test_missing_ids_are_reported_rather_than_certified_apart():
 
 def test_signed_zeros_are_duplicates():
     assert not check_split(np.array([[0.0, 1.0], [-0.0, 1.0]]), [([0], [1])]).ok
+
+
+def test_mixed_type_trial_labels_are_audited():
+    data = from_numpy(np.arange(8.0).reshape(4, 2), ("trial", "feature"), subject=[0, 0, 1, 1]).data
+    data = data.assign_coords(trial=np.array([1, "a", 2, "b"], dtype=object))
+    assert check_split(data, [([0, 1], [2, 3])]).ok

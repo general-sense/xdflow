@@ -101,7 +101,12 @@ def from_numpy(
             raise ValueError(
                 f"Coordinate '{name}' clashes with an existing coordinate; pass per-sample values as keywords."
             )
-        if name in dims and np.ndim(value) == 1 and len(value) != values.shape[dims.index(name)]:
+        if (
+            name in dims
+            and not isinstance(value, tuple)
+            and np.ndim(value) == 1
+            and len(value) != values.shape[dims.index(name)]
+        ):
             raise ValueError(
                 f"Coordinate '{name}' has {len(value)} values for a dim of size {values.shape[dims.index(name)]}."
             )
@@ -146,7 +151,7 @@ def _as_container(
                 "dims only applies to NumPy input; DataArray, DataContainer and Epochs name their own dims."
             )
         data = X.data if isinstance(X, DataContainer) else X if isinstance(X, xr.DataArray) else from_mne_epochs(X).data
-        own_trial_labels = True
+        own_trial_labels = not _is_mne_epochs(X)  # epochs get trials 0, 1, 2...: rows match them by position
     else:
         data = from_numpy(X, dims).data
         own_trial_labels = False
