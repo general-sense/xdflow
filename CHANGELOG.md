@@ -35,17 +35,18 @@ All notable changes to this project will be documented in this file.
   - `metadata=` or a `y`/`groups` Series indexed by the data's trial labels in another order is refused (rows
     otherwise match trials by position, as in scikit-learn).
   - Metadata columns whose names collide as text (`1` and `"1"`) are refused.
-  - Band-pass, multitaper and Hilbert phase transforms refuse an `fs` that matches neither `attrs["sfreq"]` nor
-    the spacing of the time coordinate (in seconds or milliseconds; without units, seconds, ms or µs unless the
-    spacing is a whole number, as for sample indices).
   - Validators refuse a `scoring` that is not a name, a callable or None (it silently fell back to the default
     metric).
-  - `LeaveGroupOutValidator` refuses `test_group_ids` that match no group (they were silently cross-validated).
+  - `LeaveGroupOutValidator` refuses `test_group_ids` that match no group in the data it cross-validates (they
+    were silently cross-validated).
   - `evaluate` refuses a DataFrame `X` with non-numeric columns, scikit-learn metric functions that need scores
     (`roc_auc_score`, `log_loss`), and trial coordinates named `fold`, `y_true` or `y_pred`.
 - `GroupedKFoldValidator` and `SampledDomainKFoldValidator` keep windows cut from one trial (`orig_trial`) on one
   side of every split and of the holdout, as `KFoldValidator` already did.
 - The Tuner works on copies of the pipelines and validator it is given, so seeding and tuning no longer change them.
+- Band-pass, multitaper and Hilbert phase transforms warn when `fs` matches neither `attrs["sfreq"]` nor the
+  spacing of the time coordinate (in seconds or milliseconds; without units, seconds, ms or µs unless the spacing is
+  a whole number, as for sample indices).
 - `SKLearnPredictor(fit_on_labels=True)` fits the estimator on the class labels themselves; `evaluate` uses it for
   scikit-learn models.
 - Validators no longer cache fitted fold pipelines on disk by default (`use_stateful_fit_cache=False`): a

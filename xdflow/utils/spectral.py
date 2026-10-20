@@ -1,3 +1,4 @@
+import warnings
 from typing import Any
 
 import numpy as np
@@ -72,11 +73,10 @@ def get_freq_band_indices(frequencies, low, high):
 
 
 def check_sampling_rate(data: Any, fs: float, name: str) -> None:
-    """Raise when no evidence of the data's sampling rate supports ``fs``. Evidence is ``attrs["sfreq"]`` (set by
+    """Warn when no evidence of the data's sampling rate supports ``fs``. Evidence is ``attrs["sfreq"]`` (set by
     ``from_mne_epochs``) and the spacing of a time coordinate in seconds or milliseconds (without units: seconds, ms
-    or µs, unless the spacing is a whole number, as for sample indices). Either can be stale (a step that decimates keeps attrs; time converted to ms may keep
-    units of seconds), so ``fs`` passes if it matches any of them. Filtering at the wrong rate shifts every frequency
-    without any other sign."""
+    or µs, unless the spacing is a whole number, as for sample indices). Either can be stale (a step that decimates
+    keeps attrs; time converted to ms may keep units of seconds), so ``fs`` passes if it matches any of them."""
     rates = []
     try:
         if data.attrs.get("sfreq") is not None:
@@ -85,7 +85,9 @@ def check_sampling_rate(data: Any, fs: float, name: str) -> None:
         pass
     time = data.coords.get("time")
     if time is not None and time.size > 1 and np.issubdtype(time.dtype, np.number):
-        spacing = float(np.median(np.diff(np.asarray(time.values, dtype=float))))
+        values = np.asarray(time.values, dtype=float)
+        # over the whole span: neighbouring steps may be rounded (timestamps in whole ms) or float32
+        spacing = (values[-1] - values[0]) / (values.size - 1) if np.all(np.diff(values) > 0) else 0.0
         units = time.attrs.get("units")
         if spacing > 0 and units in ("s", "ms"):
             rates.append({"s": 1.0, "ms": 1000.0}[units] / spacing)
@@ -94,6 +96,10 @@ def check_sampling_rate(data: Any, fs: float, name: str) -> None:
             rates.extend(per_second / spacing for per_second in (1.0, 1e3, 1e6))
     if rates and not any(np.isclose(rate, float(fs), rtol=1e-3) for rate in rates):
         evidence = ", ".join(f"{rate:g} Hz" for rate in rates)
-        raise ValueError(
-            f"{name} has fs={fs} Hz, but the data is sampled at {evidence} (attrs['sfreq'], time coordinate)."
+        # A warning, not an error: either source can be stale or in unusual units, and a correct pipeline must run.
+        warnings.warn(
+            f"{name} has fs={fs} Hz, but the data looks sampled at {evidence} (attrs['sfreq'], time coordinate). "
+            "Filtering at the wrong rate shifts every frequency; check fs.",
+            UserWarning,
+            stacklevel=3,
         )

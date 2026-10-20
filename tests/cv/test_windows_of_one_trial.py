@@ -54,3 +54,28 @@ def test_holdout_ids_that_match_no_group_are_refused():
     )
     with pytest.raises(ValueError, match="50"):
         validator.cross_validate(_windows())
+
+
+def test_holdout_ids_can_be_a_single_value_and_are_checked_once():
+    from sklearn.model_selection import GridSearchCV
+
+    from xdflow.cv import SklearnCVAdapter
+
+    data = _windows()
+    data = data.__class__(
+        data.data.assign_coords(subject=("trial", np.array(["s0", "s1", "s2", "s3"])[data.data.subject.values]))
+    )
+    validator = LeaveGroupOutValidator(group_coord="subject", test_group_ids="s3", verbose=False)
+    validator.set_pipeline(
+        Pipeline("p", [("lr", SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label"))])
+    )
+    validator.cross_validate(data)
+    assert set(data.data.subject.sel(trial=validator.holdout_trial_labels_).values) == {"s3"}
+    # nested: the inner adapter sees fold training data without the held-out subject
+    inner = SklearnCVAdapter(LeaveGroupOutValidator(group_coord="subject", test_group_ids=["s3"], verbose=False))
+    search = GridSearchCV(LogisticRegression(), {"C": [1.0]}, cv=inner)
+    outer = LeaveGroupOutValidator(group_coord="subject", test_group_ids=["s3"], verbose=False)
+    outer.set_pipeline(
+        Pipeline("q", [("gs", SKLearnPredictor.from_estimator(search, sample_dim="trial", target_coord="label"))])
+    )
+    outer.cross_validate(data)

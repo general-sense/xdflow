@@ -190,3 +190,17 @@ def test_run_tuning_pipeline_reports_the_score_of_the_tuned_validator(capsys):
     oracle = validator(exclude_intertrial_from_scoring=True)
     oracle.set_pipeline(pipeline.clone())
     assert f"{oracle.cross_validate(data):.4f}" in capsys.readouterr().out
+
+
+def test_the_tuner_accepts_steps_that_cannot_be_deep_copied():
+    import threading
+
+    from sklearn.linear_model import LogisticRegression
+
+    import xdflow
+
+    data = xdflow.from_numpy(np.random.default_rng(0).normal(size=(40, 3)), label=np.arange(40) % 2)
+    predictor = SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label")
+    predictor.session = threading.Lock()  # e.g. a runtime handle held by a custom step
+    pipeline = xdflow.make_pipeline(predictor)
+    Tuner(pipeline, KFoldValidator(n_splits=3, verbose=False), {pipeline.name: {}}, data, verbose=0)

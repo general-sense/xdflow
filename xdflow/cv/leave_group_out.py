@@ -1,5 +1,6 @@
 import warnings
 from collections.abc import Callable, Hashable, Iterator
+from typing import Any
 
 import numpy as np
 
@@ -104,14 +105,28 @@ class LeaveGroupOutValidator(CrossValidator):
 
         # Find trials belonging to holdout sessions
         group_values = container.data.coords[self.group_coord].values
-        missing = [group for group in self.test_group_ids if not np.isin(group, group_values)]
-        if missing:  # otherwise the trials meant to be held out are silently cross-validated
-            raise ValueError(f"test_group_ids {missing} match no '{self.group_coord}' value in the data.")
-        holdout_mask = np.isin(group_values, np.asarray(self.test_group_ids))
+        holdout_mask = np.isin(group_values, self._test_ids())
         holdout_indices = all_trials[holdout_mask]
         train_val_indices = all_trials[~holdout_mask]
 
         return train_val_indices, holdout_indices
+
+    def _test_ids(self) -> np.ndarray:
+        """test_group_ids as an array; a single id (e.g. "s3") is one group, not a sequence of characters."""
+        return np.atleast_1d(np.asarray(self.test_group_ids, dtype=object))
+
+    def cross_validate(self, initial_container: DataContainer, *args: Any, **kwargs: Any) -> float:
+        # Checked on the data given, not inside nested folds (which lack the held-out groups by design).
+        if (
+            self.test_group_ids is not None
+            and len(self._test_ids())
+            and self.group_coord in initial_container.data.coords
+        ):
+            values = initial_container.data.coords[self.group_coord].values
+            missing = [group for group in self._test_ids() if not np.isin(group, values)]
+            if missing:  # otherwise the trials meant to be held out are silently cross-validated
+                raise ValueError(f"test_group_ids {missing} match no '{self.group_coord}' value in the data.")
+        return super().cross_validate(initial_container, *args, **kwargs)
 
     def _get_splits(
         self, container: DataContainer, indices_to_split: np.ndarray

@@ -154,7 +154,16 @@ def _as_container(
         own_trial_labels = not _is_mne_epochs(X)  # epochs get trials 0, 1, 2...: rows match them by position
     else:
         if isinstance(X, pd.DataFrame):  # columns become one float array: dtypes that carry meaning would be lost
-            non_numeric = [str(c) for c, dtype in X.dtypes.items() if not pd.api.types.is_numeric_dtype(dtype)]
+            non_numeric = [
+                str(column)
+                for column, dtype in X.dtypes.items()
+                if not pd.api.types.is_numeric_dtype(dtype)
+                and not (
+                    pd.api.types.is_object_dtype(dtype)
+                    and pd.api.types.infer_dtype(X[column], skipna=True)
+                    in ("integer", "floating", "mixed-integer-float", "decimal", "boolean")
+                )
+            ]
             if non_numeric:
                 raise TypeError(
                     f"X has non-numeric columns {non_numeric}; xdflow works on arrays. Encode them (e.g. one-hot) "

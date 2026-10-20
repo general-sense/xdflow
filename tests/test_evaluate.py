@@ -613,3 +613,8 @@ def test_by_reports_undefined_metrics_as_nan():
         metadata=pd.DataFrame({"subject": np.repeat([0, 1], 6)}),
     )
     assert result.by("subject")["precision"].isna().all()  # no positive predictions: precision is undefined
+
+
+def test_numeric_values_in_object_columns_are_accepted():
+    X = pd.DataFrame(np.random.default_rng(0).normal(size=(30, 2))).astype(object)
+    assert len(evaluate(LogisticRegression(), X, np.arange(30) % 2, cv=3).fold_scores) == 3

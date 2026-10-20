@@ -49,7 +49,7 @@ class CARTransform(Transform):
 
     @property
     def _excluded_channels(self) -> tuple[str, ...]:
-        return tuple(self.excluded_channels or ())
+        return tuple(self.excluded_channels) if self.excluded_channels is not None else ()
 
     def _transform(self, data_container: DataContainer, **kwargs) -> DataContainer:
         """
@@ -110,7 +110,8 @@ class RegressOutReferenceTransform(Transform):
 
     @property
     def _excluded_channels(self) -> tuple[str, ...]:
-        return tuple(set(self.excluded_channels or ()) | {self.reference_channel})
+        excluded = set(self.excluded_channels) if self.excluded_channels is not None else set()
+        return tuple(excluded | {self.reference_channel})
 
     def _fit_models(self, data: xr.DataArray) -> dict[Any, LinearRegression]:
         """One reference->channel regression per target channel, pooling trials and time."""
