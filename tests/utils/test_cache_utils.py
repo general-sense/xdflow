@@ -626,3 +626,12 @@ def test_direct_data_parameters_are_hashed_by_content():
     a = np.ma.array([1, 2], mask=[0, 1], fill_value=0)
     b = np.ma.array([1, 2], mask=[0, 1], fill_value=99)
     assert hash_dict({"v": _get_object_metadata(a)}) != hash_dict({"v": _get_object_metadata(b)})
+
+
+def test_parameters_whose_contents_cannot_be_hashed_give_a_key_that_never_repeats():
+    import pandas as pd
+
+    from xdflow.utils.cache_utils import _get_object_metadata
+
+    frame = pd.DataFrame({"callback": [lambda x: x]})
+    assert hash_dict({"v": _get_object_metadata(frame)}) != hash_dict({"v": _get_object_metadata(frame)})

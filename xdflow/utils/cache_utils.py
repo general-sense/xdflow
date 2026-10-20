@@ -342,14 +342,23 @@ def _installed_code_fingerprint() -> str:
     return hashlib.md5("\n".join(sorted(entries)).encode()).hexdigest()
 
 
+def _content_hash(obj: Any) -> str:
+    """joblib's content hash; for contents it cannot hash (e.g. lambdas in a column), a key that never repeats.
+    shortcut: every call then writes a new cache entry, bounded by the cache size limit."""
+    try:
+        return joblib.hash(obj)
+    except Exception:
+        return uuid.uuid4().hex
+
+
 def _get_dataframe_metadata(df: pd.DataFrame) -> dict[str, Any]:
     """Build a deterministic signature for a pandas DataFrame from its full contents."""
-    return {"shape": tuple(df.shape), "columns": tuple(str(c) for c in df.columns), "hash": joblib.hash(df)}
+    return {"shape": tuple(df.shape), "columns": tuple(str(c) for c in df.columns), "hash": _content_hash(df)}
 
 
 def _get_series_metadata(s: pd.Series) -> dict[str, Any]:
     """Build a deterministic signature for a pandas Series from its full contents."""
-    return {"length": int(s.shape[0]), "name": str(s.name), "hash": joblib.hash(s)}
+    return {"length": int(s.shape[0]), "name": str(s.name), "hash": _content_hash(s)}
 
 
 def _get_dict_metadata(d: dict[Any, Any]) -> dict[str, Any]:
@@ -589,7 +598,7 @@ def _get_object_metadata(obj: Any) -> Any:
     if isinstance(obj, xr.DataArray):
         return _get_dataarray_metadata(obj)
     if isinstance(obj, _PANDAS_VALUES):  # their values live in private attributes
-        return {"pandas": type(obj).__name__, "hash": joblib.hash(obj)}
+        return {"pandas": type(obj).__name__, "hash": _content_hash(obj)}
     if isinstance(obj, DataContainer):
         return _get_datacontainer_metadata(obj)
     if isinstance(obj, pd.DataFrame):

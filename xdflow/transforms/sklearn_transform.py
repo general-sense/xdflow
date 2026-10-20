@@ -633,7 +633,7 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
             raise AttributeError(f"Estimator '{self.estimator.__class__.__name__}' has no method 'predict'.")
         X, _ = self._prepare_data(self._align_to_fit(data))
         predictions = self.estimator.predict(X)
-        return self.encoder.transform(predictions) if self._fits_on_labels() else predictions
+        return self._to_codes(predictions) if self._fits_on_labels() else predictions
 
     def _predict_proba(self, data: xr.DataArray, **kwargs) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -667,7 +667,21 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
             return probabilities, np.arange(probabilities.shape[1])
 
         classes = self.estimator.classes_
-        return raw_probabilities, (self.encoder.transform(classes) if self._fits_on_labels() else classes)
+        return raw_probabilities, (self._to_codes(classes) if self._fits_on_labels() else classes)
+
+    def _to_codes(self, labels: Any) -> np.ndarray:
+        """Codes of labels the estimator returned, matched exactly: LabelEncoder casts to the labels' dtype first,
+        which can turn an unknown label ("apple_extra", -1) into a known one."""
+        labels = np.asarray(labels)
+        codes = pd.Index(self.encoder.classes_).get_indexer(labels)
+        if (codes < 0).any():
+            unknown = sorted({str(label) for label in labels[codes < 0]})[:5]
+            raise ValueError(f"The estimator returned labels not among the training labels: {unknown}.")
+        return codes
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        state.setdefault("fit_on_labels", False)  # predictors saved before the parameter existed
+        self.__dict__.update(state)
 
     def _fits_on_labels(self) -> bool:
         return bool(getattr(self, "fit_on_labels", False)) and self.is_classifier and not self.is_multilabel

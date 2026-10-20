@@ -251,3 +251,36 @@ def test_multilabel_probability_is_of_the_larger_class(codes):
     fitted = make_pipeline(predictor).fit(DataContainer(data))
     proba = fitted.predict_proba(DataContainer(data)).data.values
     assert (proba[on] > 0.5).all() and (proba[~on] < 0.5).all()  # P(codes[1]), as in 0.3.0
+
+
+def test_estimator_outputs_outside_the_labels_are_refused_not_coerced():
+    import xarray as xr
+    from sklearn.base import BaseEstimator, ClassifierMixin
+
+    from xdflow import DataContainer
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    class Odd(ClassifierMixin, BaseEstimator):
+        def fit(self, X, y):
+            self.classes_ = np.unique(y)
+            return self
+
+        def predict(self, X):
+            return np.full(len(X), "apple_extra")  # "apple" after a cast to the labels' dtype
+
+    data = xr.DataArray(
+        np.zeros((6, 2)), dims=("trial", "feature"), coords={"y": ("trial", np.array(["apple", "berry"] * 3))}
+    )
+    predictor = SKLearnPredictor.from_estimator(Odd(), sample_dim="trial", target_coord="y", fit_on_labels=True)
+    with pytest.raises(Exception, match="not among the training labels: \\['apple_extra'\\]"):
+        make_pipeline(predictor).fit(DataContainer(data)).predict(DataContainer(data.drop_vars("y")))
+
+
+def test_predictors_pickled_before_fit_on_labels_still_clone():
+    import pickle
+
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    predictor = SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label")
+    del predictor.fit_on_labels  # as saved by xdflow 0.3.0
+    assert pickle.loads(pickle.dumps(predictor)).clone().fit_on_labels is False
