@@ -135,3 +135,23 @@ def test_predict_proba_with_bool_labels_has_a_column_per_class(X):
 def test_continuous_targets_are_refused_by_a_classifier(X):
     with pytest.raises(ValueError, match="continuous"):
         to_sklearn(_classifier_pipeline(), DIMS, COORDS).fit(X, np.linspace(0, 1, 80))
+
+
+def test_new_data_with_dims_in_another_order_is_put_back_in_fit_order(X, y):
+    import xarray as xr
+    from sklearn.pipeline import make_pipeline as sk_make_pipeline
+    from sklearn.preprocessing import FunctionTransformer
+
+    from xdflow import DataContainer
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    flatten = FunctionTransformer(lambda a: a.reshape(len(a), -1))
+    predictor = SKLearnPredictor.from_estimator(
+        sk_make_pipeline(flatten, LogisticRegression()), sample_dim="trial", target_coord="label"
+    )
+    data = xr.DataArray(X, dims=DIMS, coords={**COORDS, "label": ("trial", y)})
+    fitted = make_pipeline(predictor).fit(DataContainer(data))
+    unlabeled = data.drop_vars("label")
+    expected = fitted.predict(DataContainer(unlabeled)).data.values
+    transposed = fitted.predict(DataContainer(unlabeled.transpose("trial", "time", "channel"))).data.values
+    np.testing.assert_array_equal(transposed, expected)

@@ -1,3 +1,5 @@
+from typing import Any
+
 import numpy as np
 from scipy.signal import butter, filtfilt, lfilter
 
@@ -67,3 +69,11 @@ def get_freq_band_indices(frequencies, low, high):
     low_index = np.searchsorted(frequencies, low, side="left")
     high_index = np.searchsorted(frequencies, high, side="right")
     return [low_index, high_index]
+
+
+def check_sampling_rate(data: Any, fs: float, name: str) -> None:
+    """Raise when ``fs`` contradicts the sampling rate recorded with the data (``attrs["sfreq"]``, set by
+    ``from_mne_epochs``): filtering at the wrong rate shifts every frequency without any other sign."""
+    sfreq = data.attrs.get("sfreq")
+    if sfreq is not None and not np.isclose(float(sfreq), float(fs), rtol=1e-3):
+        raise ValueError(f"{name} has fs={fs} Hz, but the data was sampled at {float(sfreq):g} Hz (attrs['sfreq']).")

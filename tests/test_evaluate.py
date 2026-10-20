@@ -392,3 +392,51 @@ def test_a_non_default_range_index_names_trials():
     data = xr.DataArray(np.arange(3.0)[:, None], dims=("trial", "f"), coords={"trial": [10, 20, 30]})
     with pytest.raises(ValueError, match="order"):
         _as_container(data, metadata=pd.DataFrame({"subject": [3, 2, 1]}, index=pd.RangeIndex(30, 0, -10)))
+
+
+def test_series_keyed_by_the_trial_labels_in_another_order_is_refused():
+    rng = np.random.default_rng(0)
+    trials = np.array([f"id{i:03d}" for i in rng.permutation(40)])
+    data = xr.DataArray(rng.normal(size=(40, 3)), dims=("trial", "f"), coords={"trial": trials})
+    y = pd.Series(np.arange(40) % 2, index=np.sort(trials))
+    with pytest.raises(ValueError, match="order"):
+        evaluate(LogisticRegression(), data, y, cv=3)
+    result = evaluate(LogisticRegression(), data, y.loc[trials], cv=3)  # rows in the data's order are fine
+    got = result.predictions.set_index("trial")["y_true"].loc[y.index]
+    np.testing.assert_array_equal(got.to_numpy(), y.to_numpy())
+
+
+def test_a_metadata_column_named_sample_weight_does_not_weight_a_scikit_learn_model(model, X, y):
+    from sklearn.model_selection import StratifiedKFold
+
+    weights = np.random.default_rng(0).uniform(0.1, 5, size=120)
+    expected = cross_val_score(model, X, y, cv=StratifiedKFold(5))
+    result = evaluate(model, X, y, cv=StratifiedKFold(5), metadata=pd.DataFrame({"sample_weight": weights}))
+    np.testing.assert_allclose(result.fold_scores, expected)
+
+
+def test_a_coordinate_over_trial_and_channel_does_not_break_prediction(model, X, y):
+    data = xr.DataArray(
+        X,
+        dims=("trial", "channel", "time"),
+        coords={"label": ("trial", y), "impedance": (("trial", "channel"), np.ones((120, 2)))},
+    )
+    evaluate(model, data, "label", cv=3)
+
+
+@pytest.mark.parametrize("labels", [np.array([1, 2, 3]), np.array(["a", "b", "c"])])
+def test_class_naming_parameters_mean_what_they_mean_in_scikit_learn(labels):
+    from sklearn.dummy import DummyClassifier
+    from sklearn.model_selection import StratifiedKFold
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(120, 3))
+    y = labels[np.arange(120) % 3]
+    X[y == labels[1], 0] += 1.0
+    cv = StratifiedKFold(5)
+    for model in (
+        LogisticRegression(class_weight={labels[1]: 20.0}),
+        sklearn_make_pipeline(StandardScaler(), LogisticRegression(class_weight={labels[2]: 5.0})),
+        DummyClassifier(strategy="constant", constant=labels[1]),
+    ):
+        np.testing.assert_allclose(evaluate(model, X, y, cv=cv).fold_scores, cross_val_score(model, X, y, cv=cv))

@@ -149,28 +149,14 @@ def _as_container(
     if metadata is not None:
         if len(metadata) != data.sizes["trial"]:
             raise ValueError(f"metadata has {len(metadata)} rows for {data.sizes['trial']} trials.")
-        # Rows are matched to trials by position, as in scikit-learn.
-        # Metadata indexed by the data's own trial labels in another order could mean rows by label or rows by
-        # position: refuse rather than guess.
-        trials = data.indexes.get("trial") if own_trial_labels else None
-        index = metadata.index
-        # Labels must match one to one: a default index (0, 1, 2...) is positions, and intervals match points by
-        # containment, so neither names trials.
-        default = isinstance(index, pd.RangeIndex) and index.equals(pd.RangeIndex(len(index)))
-        containment = isinstance(index, pd.IntervalIndex) and not isinstance(trials, pd.IntervalIndex)
-        exact = not default and not containment and index.is_unique
-        rows = index.get_indexer(trials) if trials is not None and exact and len(index) == len(trials) else None
-        one_to_one = rows is not None and bool((rows >= 0).all()) and np.unique(rows).size == rows.size
-        if one_to_one and not (rows == np.arange(rows.size)).all():
-            raise ValueError(
-                "metadata is indexed by the trial labels, in another order than the data's trials. Reorder it "
-                "(metadata.loc[data.trial.values]), or drop its index (metadata.reset_index(drop=True)) if its rows "
-                "already follow the data."
-            )
+        _refuse_reordered_rows(metadata.index, data, own_trial_labels, "metadata")
         new_coords.update({str(column): metadata[column].to_numpy() for column in metadata.columns})
         given_twice = sorted(set(new_coords) & set(trial_coords))
         if given_twice:
             raise ValueError(f"{given_twice} are given both as metadata columns and as arguments; pass them once.")
+    for name, value in trial_coords.items():
+        if isinstance(value, pd.Series):
+            _refuse_reordered_rows(value.index, data, own_trial_labels, f"'{name}'")
     new_coords.update(trial_coords)
     clashes = sorted(set(new_coords) & set(data.coords))
     if clashes:
@@ -178,6 +164,25 @@ def _as_container(
     resolved: dict[str, Any] = {}
     _add_trial_coords(resolved, new_coords, data.sizes["trial"])
     return DataContainer(data.assign_coords(resolved) if resolved else data)
+
+
+def _refuse_reordered_rows(index: pd.Index, data: xr.DataArray, own_trial_labels: bool, what: str) -> None:
+    """Rows are matched to trials by position, as in scikit-learn. Rows indexed by the data's own trial labels in
+    another order could mean rows by label or rows by position: refuse rather than guess. Labels must match one to
+    one: a default index (0, 1, 2...) is positions, and intervals match points by containment, so neither names
+    trials."""
+    trials = data.indexes.get("trial") if own_trial_labels else None
+    default = isinstance(index, pd.RangeIndex) and index.equals(pd.RangeIndex(len(index)))
+    containment = isinstance(index, pd.IntervalIndex) and not isinstance(trials, pd.IntervalIndex)
+    exact = not default and not containment and index.is_unique
+    rows = index.get_indexer(trials) if trials is not None and exact and len(index) == len(trials) else None
+    if rows is not None and bool((rows >= 0).all()) and np.unique(rows).size == rows.size:
+        if not (rows == np.arange(rows.size)).all():
+            raise ValueError(
+                f"{what} is indexed by the trial labels, in another order than the data's trials. Reorder it "
+                "(.loc[data.trial.values]), or drop its index (.reset_index(drop=True)) if its rows already follow "
+                "the data."
+            )
 
 
 def _is_mne_epochs(obj: Any) -> bool:

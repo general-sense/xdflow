@@ -109,3 +109,20 @@ def test_bandpass_filter_needs_no_spectral_extra_and_explicit_fs(monkeypatch):
 
     with pytest.raises(ModuleNotFoundError, match="spectral"):
         spectral.MultiTaperTransform(fs=160)
+
+
+def test_bandpass_refuses_a_sampling_rate_that_contradicts_the_data():
+    import xarray as xr
+
+    from xdflow import DataContainer
+    from xdflow.transforms.spectral import BandpassFilterTransform
+
+    data = xr.DataArray(
+        np.random.default_rng(0).normal(size=(4, 2, 500)),
+        dims=("trial", "channel", "time"),
+        coords={"time": np.arange(500) / 250.0},
+        attrs={"sfreq": 250.0},
+    )
+    with pytest.raises(ValueError, match="250"):
+        BandpassFilterTransform(8, 30, fs=160).transform(DataContainer(data))
+    BandpassFilterTransform(8, 30, fs=250).transform(DataContainer(data))

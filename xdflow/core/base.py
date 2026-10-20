@@ -789,7 +789,7 @@ class Predictor(Transform, ABC):
         output_coords = {self.sample_dim: data.coords[self.sample_dim].values}
 
         for coord_name, coord_data in data.coords.items():
-            if (coord_name != self.sample_dim) and (self.sample_dim in coord_data.dims):
+            if (coord_name != self.sample_dim) and coord_data.dims == (self.sample_dim,):  # per-trial only
                 output_coords[coord_name] = coord_data
 
         return output_coords

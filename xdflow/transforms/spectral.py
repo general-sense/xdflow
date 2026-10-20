@@ -7,7 +7,7 @@ from joblib import Parallel, delayed
 
 from xdflow.core.base import Transform
 from xdflow.core.data_container import DataContainer
-from xdflow.utils.spectral import bandpass_filter
+from xdflow.utils.spectral import bandpass_filter, check_sampling_rate
 
 # Suppress spectral_connectivity logger messages for a cleaner output
 spectral_logger = logging.getLogger("spectral_connectivity")
@@ -245,6 +245,7 @@ class MultiTaperTransform(Transform):
             **kwargs: Additional context/parameters (ignored by this transform)
         """
         data = container.data
+        check_sampling_rate(data, self.fs, type(self).__name__)
 
         # --- 1. SETUP (This is done once, outside the parallel loop) ---
         total_time_sec = data["time"].shape[0] / self.fs
@@ -402,6 +403,7 @@ class BandpassFilterTransform(Transform):  # TODO: rename or combine with Bandpa
 
         if data.sizes["time"] == 0:
             raise ValueError("Cannot filter data with zero time points")
+        check_sampling_rate(data, self.fs, type(self).__name__)
 
         # Apply bandpass filter
         filtered_data = xr.apply_ufunc(

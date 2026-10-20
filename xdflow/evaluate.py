@@ -7,7 +7,9 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, clone
+from sklearn.base import is_classifier as is_sklearn_classifier
+from sklearn.dummy import DummyClassifier
 from sklearn.metrics import get_scorer
 from sklearn.model_selection import GroupKFold, LeaveOneGroupOut, StratifiedGroupKFold
 from sklearn.utils.multiclass import check_classification_targets
@@ -337,12 +339,32 @@ def _as_pipeline(model: Any, y_name: str | None, data) -> Pipeline:
     if not isinstance(last, Transform):
         if not (hasattr(last, "fit") and hasattr(last, "predict")):
             raise TypeError(f"Expected a scikit-learn estimator or xdflow predictor, got {type(last).__name__}.")
-        last = SKLearnPredictor.from_estimator(last, sample_dim="trial", target_coord=y_name)
+        if is_sklearn_classifier(last) and data.coords[y_name].ndim == 1:
+            last = _in_class_codes(last, data.coords[y_name].values)
+        # No sample_weight coordinate: a scikit-learn model is fit as cross_val_score would, whatever the metadata.
+        last = SKLearnPredictor.from_estimator(last, sample_dim="trial", target_coord=y_name, sample_weight_coord=None)
     elif isinstance(last, Predictor) and getattr(last, "target_coord", y_name) != y_name:
         raise ValueError(f"The final predictor predicts '{last.target_coord}' but y is '{y_name}'.")
     if not head and isinstance(last, Pipeline):
         return last
     return make_pipeline(*head, last, name="model")
+
+
+def _in_class_codes(estimator: Any, labels: np.ndarray) -> Any:
+    """The estimator with its class-naming parameters (``class_weight`` dicts, ``DummyClassifier``'s ``constant``)
+    given as the codes 0, 1, 2... of the sorted classes, which xdflow fits classifiers on, so that it behaves as
+    scikit-learn fitting it on the labels themselves."""
+    codes = {label: code for code, label in enumerate(np.unique(labels))}
+    params = estimator.get_params(deep=True)
+    updates: dict[str, Any] = {}
+    for key, value in params.items():
+        owner_key, _, name = key.rpartition("__")
+        owner = params.get(owner_key, estimator) if owner_key else estimator
+        if name == "class_weight" and isinstance(value, dict):
+            updates[key] = {codes.get(label, label): weight for label, weight in value.items()}
+        elif name == "constant" and isinstance(owner, DummyClassifier) and np.ndim(value) == 0 and value in codes:
+            updates[key] = codes[value]
+    return clone(estimator).set_params(**updates) if updates else estimator
 
 
 def _as_validator(

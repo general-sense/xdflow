@@ -159,6 +159,7 @@ class SKLearnTransform(Transform, SampleWeightMixin):
         self._fit_labels = {
             dim: data.indexes[dim] for dim in data.dims if dim != self.sample_dim and dim in data.indexes
         }
+        self._fit_dims = data.dims
 
     def _align_to_fit(self, data: xr.DataArray) -> xr.DataArray:
         """Order every non-sample dimension as it was at fit.
@@ -166,6 +167,9 @@ class SKLearnTransform(Transform, SampleWeightMixin):
         The estimator sees values by position, so input whose features or channels arrive in another order
         would otherwise be silently mis-assigned. Labels missing from the new data raise.
         """
+        fit_dims = getattr(self, "_fit_dims", None)  # absent in models pickled before dim order was recorded
+        if fit_dims is not None and set(data.dims) == set(fit_dims) and data.dims != fit_dims:
+            data = data.transpose(*fit_dims)  # N-D estimators read axes by position, like features
         for dim, fitted in getattr(self, "_fit_labels", {}).items():
             if dim not in data.indexes or data.indexes[dim].equals(fitted):
                 continue
