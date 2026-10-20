@@ -20,7 +20,7 @@ uv run python examples/har_activity.py
 - **Dependencies:** only the base xdflow install (xarray, NumPy, pandas, scikit-learn).
 - **Download:** the first run downloads the 61 MB UCI zip and keeps the 61 MB dataset archive inside it in `~/xdflow_data`. Set `XDFLOW_DATA_DIR` or pass `--data-dir PATH` to use another directory. The signals are read straight from that archive, so nothing else is unpacked. The download took a few seconds here.
 - **Runtime:** after the download, the script runs in under a minute on a laptop.
-- **Fit cache:** xdflow validators cache fitted fold pipelines on disk (`~/.cache/xdflow`, or `XDFLOW_CACHE_DIR`), about 0.4 MB for this script (measured while writing this page). A second run reuses them, so it is faster. The timings above are from runs that started with an empty cache.
+- **Fit cache:** with `use_stateful_fit_cache=True`, xdflow validators cache fitted fold pipelines on disk (`~/.cache/xdflow`, or `XDFLOW_CACHE_DIR`), and a second run reuses them. It is off by default, and in this script; the timings above are without it.
 
 ## The data
 

@@ -127,12 +127,12 @@ changes. **`xdflow` finds the optimal point for you, automatically, at every lev
 2. **Reuse across folds, tuning trials and runs.** The shared part runs once per validation run. With
    caching on (the default when tuning; `Pipeline(use_cache=True)` otherwise), its output is stored under
    a hash of the data values, coordinates and attrs, every step's configuration, and the code. Tuning
-   trials that only change later steps reuse it instead of recomputing features. Fitted fold models are
-   cached under their exact training set. Results that depend on your own functions (`@xdflow.step`,
-   lambdas) are recomputed rather than reused from disk unless you set `XDFLOW_CACHE_USER_CODE=1`, since
-   xdflow cannot see every code a function depends on. Keys also cover the installed packages, but not files
-   or environment variables a step reads, or the global random state: for a seed study, set `random_state`
-   or turn the fit cache off (`use_stateful_fit_cache=False`).
+   trials that only change later steps reuse it instead of recomputing features. Fitted fold models can be
+   cached too, under their exact training set (`use_stateful_fit_cache=True`, off by default: a reused fit of
+   an estimator without `random_state` repeats one random draw). Results that depend on your own functions
+   (`@xdflow.step`, lambdas) are recomputed rather than reused from disk unless you set
+   `XDFLOW_CACHE_USER_CODE=1`, since xdflow cannot see every code a function depends on. Keys also cover the
+   installed packages, but not files or environment variables a step reads.
 3. **Splits by name.** Folds and holdouts are defined by coordinates such as `subject` or `session`, so
    keeping correlated samples apart is one argument rather than a `groups` array kept in sync by hand.
    You choose what to keep apart; xdflow keeps it in sync, everywhere.

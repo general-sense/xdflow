@@ -27,18 +27,25 @@ All notable changes to this project will be documented in this file.
   `CrossValidator.split_trials_` records each fold's training and validation trials.
 - Examples: `examples/evaluate_existing_model.py` and `examples/moabb_evaluation.py`.
 
-### Fixed
+### Changed
 
-- Fitted classifiers predict on data without a label coordinate (new, unlabeled recordings).
-- Cross-validation and `Pipeline(use_cache=True)` no longer fail when a fold pipeline or a cached result cannot
-  be pickled (for example a lambda step); that part runs uncached, with a warning.
-- The Tuner no longer prints its pipeline template on every trial.
+- Validators no longer cache fitted fold pipelines on disk by default (`use_stateful_fit_cache=False`): a
+  reused fit of an estimator without `random_state` repeated one random draw, so a seed study showed no
+  variance. Steps that learn nothing still run once per cross-validation run, and the Tuner still reuses
+  their outputs across trials. Pass `use_stateful_fit_cache=True` (or `evaluate(cache=True)`) to reuse fits.
 - Results that depend on functions from your own code (`@step` functions, lambdas, `FunctionTransform`) are no
   longer reused from the disk cache, which could return stale results after a change in code the cache key did
   not cover (e.g. a helper in another module). Set `XDFLOW_CACHE_USER_CODE=1` to cache them; their keys now
   include the helpers, constants and modules they read. Cache keys also hash dict, pandas, xarray and random
   generator parameters by content, and include the installed packages and xdflow's own source, so upgrading or
   reinstalling a package invalidates cached results.
+
+### Fixed
+
+- Fitted classifiers predict on data without a label coordinate (new, unlabeled recordings).
+- Cross-validation and `Pipeline(use_cache=True)` no longer fail when a fold pipeline or a cached result cannot
+  be pickled (for example a lambda step); that part runs uncached, with a warning.
+- The Tuner no longer prints its pipeline template on every trial.
 
 ## [0.3.0] - 2026-10-10
 
