@@ -108,8 +108,9 @@ class Tuner:
         if isinstance(pipelines_to_tune, Pipeline):
             pipelines_to_tune = [pipelines_to_tune]
 
-        self.pipelines_to_tune = {p.name: p for p in pipelines_to_tune}
-        self.cv_strategy = cv_strategy
+        # Copies: seeding and tuning must not change the pipelines and validator the caller keeps using.
+        self.pipelines_to_tune = {p.name: copy.deepcopy(p) for p in pipelines_to_tune}
+        self.cv_strategy = copy.deepcopy(cv_strategy)
         self.param_grid = param_grid
         self.initial_data = initial_data_container
         self.sampler = sampler or TPESampler(seed=random_seed)

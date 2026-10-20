@@ -284,3 +284,49 @@ def test_predictors_pickled_before_fit_on_labels_still_clone():
     predictor = SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label")
     del predictor.fit_on_labels  # as saved by xdflow 0.3.0
     assert pickle.loads(pickle.dumps(predictor)).clone().fit_on_labels is False
+
+
+@pytest.mark.parametrize("case", ["ints_for_bools", "column_vector"])
+def test_estimator_outputs_equal_to_the_labels_are_accepted(case):
+    import xarray as xr
+    from sklearn.base import BaseEstimator, ClassifierMixin
+
+    from xdflow import DataContainer
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    labels = np.array([False, True] * 3) if case == "ints_for_bools" else np.array(["left", "right"] * 3)
+
+    class Model(ClassifierMixin, BaseEstimator):  # like XGBoost (0/1 for bools) or CatBoost (shape (n, 1))
+        def fit(self, X, y):
+            self.classes_ = np.unique(y)
+            return self
+
+        def predict(self, X):
+            if case == "ints_for_bools":
+                return (np.arange(len(X)) % 2).astype(int)
+            return labels[: len(X)].reshape(-1, 1)
+
+    data = xr.DataArray(np.zeros((6, 2)), dims=("trial", "feature"), coords={"y": ("trial", labels)})
+    predictor = SKLearnPredictor.from_estimator(Model(), sample_dim="trial", target_coord="y", fit_on_labels=True)
+    predicted = make_pipeline(predictor).fit(DataContainer(data)).predict(DataContainer(data.drop_vars("y")))
+    np.testing.assert_array_equal(predicted.data.values, labels)
+
+
+def test_a_multilabel_target_seen_with_one_class_reads_its_classes_not_its_columns():
+    import xarray as xr
+    from sklearn.neural_network import MLPClassifier
+
+    from xdflow import DataContainer
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    rng = np.random.default_rng(0)
+    data = xr.DataArray(
+        rng.normal(size=(20, 2)),
+        dims=("trial", "feature"),
+        coords={"a": ("trial", np.ones(20, int)), "b": ("trial", np.arange(20) % 2)},
+    )
+    predictor = SKLearnPredictor(  # wrapped per target in a MultiOutputClassifier
+        MLPClassifier, sample_dim="trial", target_coord=["a", "b"], is_multilabel=True, max_iter=50, random_state=0
+    )
+    proba = make_pipeline(predictor).fit(DataContainer(data)).predict_proba(DataContainer(data)).data.values
+    np.testing.assert_allclose(proba[:, 0], 1.0)

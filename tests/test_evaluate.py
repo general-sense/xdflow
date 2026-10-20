@@ -548,3 +548,16 @@ def test_a_stacking_classifier_with_the_default_final_estimator_is_accepted():
     np.testing.assert_allclose(
         evaluate(model, X, y, cv=cv).fold_scores, cross_val_score(model, X, y, cv=cv, scoring="accuracy")
     )
+
+
+def test_a_dataframe_with_non_numeric_columns_is_refused():
+    X = pd.DataFrame({"a": np.arange(12.0), "kind": pd.Categorical(list("xyz") * 4)})
+    with pytest.raises(TypeError, match="kind"):
+        evaluate(LogisticRegression(), X, np.arange(12) % 2, cv=3)
+
+
+def test_many_classes_are_cross_validated():
+    rng = np.random.default_rng(0)
+    y = np.repeat(np.arange(150), 6)
+    X = rng.normal(size=(900, 2)) + y[:, None]
+    assert len(evaluate(LogisticRegression(max_iter=50), X, y, cv=3).fold_scores) == 3

@@ -378,12 +378,11 @@ class GroupedKFoldValidator(CrossValidator):
             stratify_labels = labels
 
         # Split positions (not trial labels) so group lookups below index all_groups correctly
-        train_val_pos, holdout_pos = train_test_split(
-            np.arange(len(all_trials)),
-            test_size=self.test_size,
-            stratify=stratify_labels,
-            random_state=self.random_state,
+        units, unit_labels, to_trials = self._split_units(container.data, stratify_labels)
+        train_val_units, holdout_units = train_test_split(
+            units, test_size=self.test_size, stratify=unit_labels, random_state=self.random_state
         )
+        train_val_pos, holdout_pos = to_trials(train_val_units), to_trials(holdout_units)
 
         if (
             self.train_groups is not None and self.val_groups is not None
@@ -437,7 +436,9 @@ class GroupedKFoldValidator(CrossValidator):
             stratify_labels = labels_array
 
         # skf.split works on integer positions, so we map back to trial IDs
-        for train_pos, val_pos in skf.split(np.arange(len(labels_array)), stratify_labels):
+        units, unit_labels, to_trials = self._split_units(cv_container, stratify_labels)
+        for train_units, val_units in skf.split(units, unit_labels):
+            train_pos, val_pos = to_trials(train_units), to_trials(val_units)
             # keep only indices that are relevant to the specified groups
             if self.train_groups is not None:
                 train_pos = train_pos[np.isin(cv_groups[train_pos], np.asarray(self.train_groups))]

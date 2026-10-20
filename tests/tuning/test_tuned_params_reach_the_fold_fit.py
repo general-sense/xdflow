@@ -136,3 +136,21 @@ def test_the_first_trial_uses_a_wrapped_scikit_learn_pipelines_own_values():
     )
     tuner.tune(n_trials=1)
     assert tuner.study.trials[0].params["model__pipeline__logisticregression__C"] == 0.5
+
+
+def test_the_tuner_leaves_the_objects_it_was_given_unchanged():
+    from sklearn.ensemble import RandomForestClassifier
+
+    import xdflow
+
+    rng = np.random.default_rng(0)
+    data = xdflow.from_numpy(rng.normal(size=(40, 3)), label=np.arange(40) % 2)
+    pipeline = xdflow.make_pipeline(
+        SKLearnPredictor(
+            RandomForestClassifier, sample_dim="trial", target_coord="label", random_state=42, n_estimators=5
+        )
+    )
+    validator = KFoldValidator(n_splits=3, random_state=3, verbose=False)
+    Tuner(pipeline, validator, {pipeline.name: {"randomforestclassifier": {"n_estimators": [5, 6]}}}, data, verbose=0)
+    assert validator.random_state == 3
+    assert pipeline.steps[0].transform.get_params()["random_state"] == 42

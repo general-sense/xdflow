@@ -364,7 +364,11 @@ class CrossValidator(ABC):
         n_unique = len(unique)
         min_count = counts.min() if counts.size else 0
 
-        if n_unique > 100:
+        if (
+            n_unique > 100
+            and np.issubdtype(np.asarray(labels).dtype, np.floating)
+            and not np.all(np.mod(np.asarray(labels, dtype=float), 1) == 0)
+        ):  # many classes are fine; many non-integral values look like a continuous target
             raise ValueError(
                 f"Stratification coord in {context} has too many unique values ({n_unique}). "
                 "This looks continuous; bin the coord before stratifying."
@@ -381,6 +385,16 @@ class CrossValidator(ABC):
                 f"Stratification coord in {context} has classes with fewer than 2 samples (min_count={min_count}). "
                 "train_test_split with stratify requires at least 2 samples per class. Bin or filter before stratifying."
             )
+
+    def _split_units(self, data, labels: np.ndarray | None) -> tuple[np.ndarray, np.ndarray | None, Callable]:
+        """Windows cut from one trial (``orig_trial``) stay on one side of every split: the positions of the units
+        to split, their labels, and a function turning unit positions back into trial positions."""
+        groups = self._resolve_orig_trial_groups(data)
+        if groups is None:
+            return np.arange(data.sizes["trial"]), labels, lambda positions: positions
+        _, first, inverse = np.unique(groups, return_index=True, return_inverse=True)
+        unit_labels = None if labels is None else np.asarray(labels)[first]
+        return np.arange(first.size), unit_labels, lambda positions: np.flatnonzero(np.isin(inverse, positions))
 
     def _resolve_orig_trial_groups(self, data) -> np.ndarray | None:
         """Return per-trial grouping values based on orig_trial, if present."""

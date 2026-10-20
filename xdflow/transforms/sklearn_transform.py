@@ -672,8 +672,14 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
     def _to_codes(self, labels: Any) -> np.ndarray:
         """Codes of labels the estimator returned, matched exactly: LabelEncoder casts to the labels' dtype first,
         which can turn an unknown label ("apple_extra", -1) into a known one."""
-        labels = np.asarray(labels)
-        codes = pd.Index(self.encoder.classes_).get_indexer(labels)
+        labels = np.ravel(np.asarray(labels))  # some estimators predict a column vector
+        classes = self.encoder.classes_
+        try:  # the training labels' dtype (XGBoost predicts 0/1 for bool labels), but only where values survive it
+            cast = labels.astype(classes.dtype)
+            same = np.asarray(cast == labels, dtype=bool)
+        except (TypeError, ValueError):
+            cast, same = labels, np.ones(labels.shape, dtype=bool)
+        codes = np.where(same, pd.Index(classes).get_indexer(cast), -1)
         if (codes < 0).any():
             unknown = sorted({str(label) for label in labels[codes < 0]})[:5]
             raise ValueError(f"The estimator returned labels not among the training labels: {unknown}.")
@@ -707,12 +713,17 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
 
 
 def _positive_class_probability(probabilities: np.ndarray, classes: Any) -> np.ndarray:
-    """One binary target's probability of its larger class (1 for 0/1 targets), from its predict_proba columns.
-    A target seen with one class alone has one column: its probability is 1 or 0 if that class is 1 or 0, and
-    unknown otherwise."""
-    if probabilities.shape[1] == 2 or classes is None:
+    """One binary target's probability of its larger class (1 for 0/1 targets), from its predict_proba columns,
+    which follow its classes. A target seen with one class alone gives 1 or 0 if that class is 1 or 0 (some
+    estimators still return two columns), and is unknown otherwise."""
+    if classes is None:
         return probabilities[:, -1]
-    (seen,) = np.asarray(classes)
-    if seen in (0, 1):
-        return np.full(len(probabilities), float(seen))
-    raise ValueError(f"A multilabel target was trained on class {seen!r} alone, so its positive class is unknown.")
+    classes = np.asarray(classes)
+    if classes.size == 2:
+        return probabilities[:, -1]
+    if classes.size == 1:
+        (seen,) = classes
+        if seen in (0, 1):
+            return np.full(len(probabilities), float(seen))
+        raise ValueError(f"A multilabel target was trained on class {seen!r} alone, so its positive class is unknown.")
+    raise ValueError(f"Multilabel targets must be binary; one has classes {classes.tolist()}.")

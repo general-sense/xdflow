@@ -77,6 +77,10 @@ def check_sampling_rate(data: Any, fs: float, name: str) -> None:
     frequency without any other sign. Either alone can be stale (a step that decimates keeps attrs; time converted
     to ms keeps its units), so nothing is checked when they disagree."""
     sfreq, time = data.attrs.get("sfreq"), data.coords.get("time")
+    try:
+        sfreq = None if sfreq is None else float(sfreq)
+    except (TypeError, ValueError):  # not a number ("250 Hz"): nothing to check against
+        sfreq = None
     if sfreq is None or time is None or time.size < 2 or not np.issubdtype(time.dtype, np.number):
         return
     spacing = float(np.median(np.diff(np.asarray(time.values, dtype=float))))

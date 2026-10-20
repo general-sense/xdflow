@@ -190,16 +190,14 @@ class SampledDomainKFoldValidator(CrossValidator):
             ):
                 stratify_coord = self._resolve_label_coord(container)
 
-        if stratify_coord:
-            labels = container.data.coords[stratify_coord].values[target_mask]
+        labels = container.data.coords[stratify_coord].values[target_mask] if stratify_coord else None
+        if labels is not None:
             self._validate_stratify_labels(labels, n_splits=None, test_size=self.test_size, context="holdout split")
-            _, holdout_target = train_test_split(
-                target_trials, test_size=self.test_size, stratify=labels, random_state=self.random_state
-            )
-        else:
-            _, holdout_target = train_test_split(
-                target_trials, test_size=self.test_size, random_state=self.random_state
-            )
+        units, unit_labels, to_trials = self._split_units(container.data.sel(trial=target_trials), labels)
+        _, holdout_units = train_test_split(
+            units, test_size=self.test_size, stratify=unit_labels, random_state=self.random_state
+        )
+        holdout_target = target_trials[to_trials(holdout_units)]
 
         train_val_indices = all_trials[~np.isin(all_trials, holdout_target)]
         return train_val_indices, holdout_target
@@ -232,18 +230,22 @@ class SampledDomainKFoldValidator(CrossValidator):
         ):
             stratify_coord = label_coord
 
+        target_data = cv_container.sel(trial=target_trials)
         if stratify_coord:
             if stratify_coord not in cv_container.coords:
                 raise ValueError(f"Stratification coord '{stratify_coord}' not found in container coords.")
             labels_target = cv_container.coords[stratify_coord].values[target_mask]
             self._validate_stratify_labels(labels_target, n_splits=self.n_splits, test_size=None, context="CV split")
+            units, unit_labels, to_trials = self._split_units(target_data, labels_target)
             splitter = StratifiedKFold(n_splits=self.n_splits, shuffle=self.shuffle, random_state=self.random_state)
-            splits = splitter.split(np.arange(target_trials.size), labels_target)
+            splits = splitter.split(units, unit_labels)
         else:
+            units, _, to_trials = self._split_units(target_data, None)
             splitter = KFold(n_splits=self.n_splits, shuffle=self.shuffle, random_state=self.random_state)
-            splits = splitter.split(np.arange(target_trials.size))
+            splits = splitter.split(units)
 
-        for fold_idx, (train_pos, val_pos) in enumerate(splits):
+        for fold_idx, (train_units, val_units) in enumerate(splits):
+            train_pos, val_pos = to_trials(train_units), to_trials(val_units)
             target_train_indices = target_trials[train_pos]
             target_val_indices = target_trials[val_pos]
             target_train_labels = labels_all[target_mask][train_pos]

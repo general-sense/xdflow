@@ -103,7 +103,11 @@ class LeaveGroupOutValidator(CrossValidator):
             return all_trials, np.array([])
 
         # Find trials belonging to holdout sessions
-        holdout_mask = np.isin(container.data.coords[self.group_coord].values, np.asarray(self.test_group_ids))
+        group_values = container.data.coords[self.group_coord].values
+        missing = [group for group in self.test_group_ids if not np.isin(group, group_values)]
+        if missing:  # otherwise the trials meant to be held out are silently cross-validated
+            raise ValueError(f"test_group_ids {missing} match no '{self.group_coord}' value in the data.")
+        holdout_mask = np.isin(group_values, np.asarray(self.test_group_ids))
         holdout_indices = all_trials[holdout_mask]
         train_val_indices = all_trials[~holdout_mask]
 
