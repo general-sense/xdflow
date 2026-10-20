@@ -332,3 +332,9 @@ def test_unlabeled_data_reaches_the_rerun_unlabeled(container):
 
     unlabeled = DataContainer(container.data.drop_vars("trial"))
     np.testing.assert_allclose(rebuilt().transform(unlabeled).data.values, container.data.values * 2)
+
+
+def test_coordinate_attrs_survive_a_step(container):
+    data = container.data.assign_coords(time=("time", container.data.time.values, {"units": "s"}))
+    out = scale().transform(DataContainer(data))
+    assert out.data.time.attrs == {"units": "s"}

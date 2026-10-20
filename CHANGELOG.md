@@ -29,6 +29,18 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- New checks that raise instead of computing something else:
+  - Predictors refuse new data whose dims differ from those seen at fit, or that lacks the labels of a fitted dim
+    (a transposed or reordered layout is realigned).
+  - `metadata=` or a `y`/`groups` Series indexed by the data's trial labels in another order is refused (rows
+    otherwise match trials by position, as in scikit-learn).
+  - Metadata columns whose names collide as text (`1` and `"1"`) are refused.
+  - Band-pass, multitaper and Hilbert phase transforms refuse an `fs` that contradicts both `attrs["sfreq"]` and
+    the time coordinate.
+  - Validators refuse a `scoring` that is not a name, a callable or None (it silently fell back to the default
+    metric).
+- `SKLearnPredictor(fit_on_labels=True)` fits the estimator on the class labels themselves; `evaluate` uses it for
+  scikit-learn models.
 - Validators no longer cache fitted fold pipelines on disk by default (`use_stateful_fit_cache=False`): a
   reused fit of an estimator without `random_state` repeated one random draw, so a seed study showed no
   variance. Steps that learn nothing still run once per cross-validation run, and the Tuner still reuses

@@ -693,8 +693,12 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
 
 
 def _positive_class_probability(probabilities: np.ndarray, classes: Any) -> np.ndarray:
-    """Probability of class 1 from one binary target's predict_proba columns (zero if 1 was never seen)."""
-    if classes is None:
-        return probabilities[:, 1] if probabilities.shape[1] == 2 else probabilities[:, -1]
-    positive = np.flatnonzero(np.asarray(classes) == 1)
-    return probabilities[:, positive[0]] if positive.size else np.zeros(len(probabilities))
+    """One binary target's probability of its larger class (1 for 0/1 targets), from its predict_proba columns.
+    A target seen with one class alone has one column: its probability is 1 or 0 if that class is 1 or 0, and
+    unknown otherwise."""
+    if probabilities.shape[1] == 2 or classes is None:
+        return probabilities[:, -1]
+    (seen,) = np.asarray(classes)
+    if seen in (0, 1):
+        return np.full(len(probabilities), float(seen))
+    raise ValueError(f"A multilabel target was trained on class {seen!r} alone, so its positive class is unknown.")

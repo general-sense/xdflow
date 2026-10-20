@@ -72,18 +72,18 @@ def get_freq_band_indices(frequencies, low, high):
 
 
 def check_sampling_rate(data: Any, fs: float, name: str) -> None:
-    """Raise when ``fs`` contradicts the data's sampling rate: the spacing of a time coordinate in seconds (as made
-    by ``from_mne_epochs``), else ``attrs["sfreq"]``, which a step that decimates may leave stale. Filtering at the
-    wrong rate shifts every frequency without any other sign."""
-    time = data.coords.get("time")
-    if time is not None and time.attrs.get("units") == "s" and time.size > 1:
-        actual, source = 1.0 / float(np.median(np.diff(np.asarray(time.values, dtype=float)))), "time coordinate"
-    elif data.attrs.get("sfreq") is not None:
-        actual, source = float(data.attrs["sfreq"]), "attrs['sfreq']"
-    else:
+    """Raise when ``fs`` contradicts the data's sampling rate, as stated by both ``attrs["sfreq"]`` (set by
+    ``from_mne_epochs``) and the spacing of the time coordinate in seconds. Filtering at the wrong rate shifts every
+    frequency without any other sign. Either alone can be stale (a step that decimates keeps attrs; time converted
+    to ms keeps its units), so nothing is checked when they disagree."""
+    sfreq, time = data.attrs.get("sfreq"), data.coords.get("time")
+    if sfreq is None or time is None or time.size < 2 or not np.issubdtype(time.dtype, np.number):
         return
-    if not np.isclose(actual, float(fs), rtol=1e-3):
+    spacing = float(np.median(np.diff(np.asarray(time.values, dtype=float))))
+    if spacing <= 0 or not np.isclose(1.0 / spacing, float(sfreq), rtol=1e-3):
+        return
+    if not np.isclose(float(sfreq), float(fs), rtol=1e-3):
         raise ValueError(
-            f"{name} has fs={fs} Hz, but the data is sampled at {actual:g} Hz (from its {source}). If a step changed "
-            "the sampling rate, update attrs['sfreq'] (or give the time coordinate units of seconds)."
+            f"{name} has fs={fs} Hz, but the data is sampled at {float(sfreq):g} Hz (attrs['sfreq'] and the time "
+            "coordinate agree)."
         )

@@ -233,3 +233,21 @@ def test_native_multilabel_estimator_with_a_one_class_target(estimator):
     predictor = SKLearnPredictor.from_estimator(model, sample_dim="trial", target_coord=["a", "b"], is_multilabel=True)
     proba = make_pipeline(predictor).fit(DataContainer(data)).predict_proba(DataContainer(data)).data.values
     np.testing.assert_allclose(proba[:, 0], 0.0)  # "a" was never positive in training
+
+
+@pytest.mark.parametrize("codes", [(0, 1), (1, 2), ("no", "yes")])
+def test_multilabel_probability_is_of_the_larger_class(codes):
+    import xarray as xr
+
+    from xdflow import DataContainer
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    rng = np.random.default_rng(0)
+    on = np.arange(40) % 2 == 1
+    values = rng.normal(size=(40, 2)) + on[:, None] * 3.0
+    target = np.where(on, codes[1], codes[0])
+    data = xr.DataArray(values, dims=("trial", "feature"), coords={"a": ("trial", target), "b": ("trial", target)})
+    predictor = SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord=["a", "b"], is_multilabel=True)
+    fitted = make_pipeline(predictor).fit(DataContainer(data))
+    proba = fitted.predict_proba(DataContainer(data)).data.values
+    assert (proba[on] > 0.5).all() and (proba[~on] < 0.5).all()  # P(codes[1]), as in 0.3.0

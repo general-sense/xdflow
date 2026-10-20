@@ -337,7 +337,7 @@ def _read_only(data: xr.DataArray) -> xr.DataArray:
     locked = data.copy(deep=False, data=values)
     for name, index in data.indexes.items():
         if name in data.dims and not isinstance(index, pd.MultiIndex):
-            locked = locked.assign_coords({name: index.copy(deep=True)})
+            locked = locked.assign_coords({name: (name, index.copy(deep=True), dict(data.coords[name].attrs))})
     for name, coord in data.coords.items():
         if name not in data.indexes and isinstance(coord.variable.data, np.ndarray):
             view = coord.variable.data.view()
