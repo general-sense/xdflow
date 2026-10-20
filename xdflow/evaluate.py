@@ -10,6 +10,7 @@ import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.base import is_classifier as is_sklearn_classifier
 from sklearn.base import is_regressor as is_sklearn_regressor
+from sklearn.exceptions import UndefinedMetricWarning
 from sklearn.metrics import get_scorer
 from sklearn.model_selection import GroupKFold, LeaveOneGroupOut, StratifiedGroupKFold
 from sklearn.utils.multiclass import check_classification_targets
@@ -66,12 +67,14 @@ class EvaluationResult:
         rows = []
         for value, group in self.predictions.groupby(coord, sort=True, dropna=False):
             y_true, y_pred = np.stack(group["y_true"].to_numpy()), np.stack(group["y_pred"].to_numpy())
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
                 try:
                     score = float(scoring_func(y_true, y_pred))
                 except ValueError:
                     score = np.nan
+            if any(issubclass(w.category, UndefinedMetricWarning) for w in caught):
+                score = np.nan  # scikit-learn's fallback (e.g. precision 0 with no positive prediction) is not a score
             rows.append({coord: value, metric: score, "n_trials": len(group)})
         return pd.DataFrame(rows).set_index(coord)
 

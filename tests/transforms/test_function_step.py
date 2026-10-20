@@ -338,3 +338,15 @@ def test_coordinate_attrs_survive_a_step(container):
     data = container.data.assign_coords(time=("time", container.data.time.values, {"units": "s"}))
     out = scale().transform(DataContainer(data))
     assert out.data.time.attrs == {"units": "s"}
+
+
+def test_nested_coordinate_attrs_cannot_change_the_callers_data(container):
+    data = container.data.assign_coords(time=("time", container.data.time.values, {"calibration": {"scale": 1}}))
+
+    @step
+    def bump(d):
+        d.time.attrs["calibration"]["scale"] += 1
+        return d
+
+    bump().transform(DataContainer(data))
+    assert data.time.attrs["calibration"]["scale"] == 1

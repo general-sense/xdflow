@@ -401,3 +401,25 @@ def test_fit_on_labels_survives_clone_and_early_stopping():
     fitted = predictor.clone().fit(data)
     np.testing.assert_array_equal(np.sort(fitted.estimator.classes_), [-1, 0, 1])
     assert (fitted.predict(data).data.values == labels).mean() > 0.9
+
+
+def test_multilabel_early_stopping_with_a_one_class_target():
+    data = DataContainer(
+        xr.DataArray(
+            np.random.default_rng(0).normal(size=(60, 3)),
+            dims=("trial", "feature"),
+            coords={"a": ("trial", np.ones(60, dtype=int)), "b": ("trial", np.arange(60) % 2)},
+        )
+    )
+    predictor = LGBMPredictor(
+        LGBMClassifier,
+        sample_dim="trial",
+        target_coord=["a", "b"],
+        is_multilabel=True,
+        early_stopping_rounds=2,
+        validation_seed=0,
+        n_estimators=3,
+        n_jobs=1,
+        verbose=-1,
+    ).fit(data)
+    np.testing.assert_allclose(predictor.predict_proba(data).data.values[:, 0], 1.0)

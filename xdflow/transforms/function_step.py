@@ -1,5 +1,6 @@
 """Turn plain functions into pipeline steps."""
 
+import copy
 import inspect
 from types import FunctionType
 from typing import Any
@@ -337,7 +338,8 @@ def _read_only(data: xr.DataArray) -> xr.DataArray:
     locked = data.copy(deep=False, data=values)
     for name, index in data.indexes.items():
         if name in data.dims and not isinstance(index, pd.MultiIndex):
-            locked = locked.assign_coords({name: (name, index.copy(deep=True), dict(data.coords[name].attrs))})
+            attrs = copy.deepcopy(dict(data.coords[name].attrs))  # nested values too: steps must not change the input
+            locked = locked.assign_coords({name: (name, index.copy(deep=True), attrs)})
     for name, coord in data.coords.items():
         if name not in data.indexes and isinstance(coord.variable.data, np.ndarray):
             view = coord.variable.data.view()

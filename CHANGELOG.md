@@ -35,8 +35,8 @@ All notable changes to this project will be documented in this file.
   - `metadata=` or a `y`/`groups` Series indexed by the data's trial labels in another order is refused (rows
     otherwise match trials by position, as in scikit-learn).
   - Metadata columns whose names collide as text (`1` and `"1"`) are refused.
-  - Band-pass, multitaper and Hilbert phase transforms refuse an `fs` that contradicts both `attrs["sfreq"]` and
-    the time coordinate.
+  - Band-pass, multitaper and Hilbert phase transforms refuse an `fs` that matches neither `attrs["sfreq"]` nor
+    the spacing of the time coordinate (in seconds or milliseconds).
   - Validators refuse a `scoring` that is not a name, a callable or None (it silently fell back to the default
     metric).
   - `LeaveGroupOutValidator` refuses `test_group_ids` that match no group (they were silently cross-validated).

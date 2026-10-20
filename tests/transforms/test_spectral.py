@@ -146,3 +146,22 @@ def test_bandpass_checks_the_rate_only_when_data_and_metadata_agree():
     BandpassFilterTransform(8, 30, fs=160).transform(DataContainer(in_ms))
     with pytest.raises(ValueError, match="160"):
         BandpassFilterTransform(8, 30, fs=250).transform(DataContainer(data))
+
+
+def test_bandpass_refuses_an_fs_that_no_evidence_supports():
+    import xarray as xr
+
+    from xdflow import DataContainer
+    from xdflow.transforms.spectral import BandpassFilterTransform
+
+    data = xr.DataArray(
+        np.random.default_rng(0).normal(size=(4, 2, 1000)),
+        dims=("trial", "channel", "time"),
+        coords={"time": ("time", np.arange(1000) / 500.0, {"units": "s"})},
+        attrs={"sfreq": 250.0},  # stale
+    )
+    with pytest.raises(ValueError, match="100"):
+        BandpassFilterTransform(8, 30, fs=100).transform(DataContainer(data))
+    BandpassFilterTransform(8, 30, fs=500).transform(DataContainer(data))  # the time coordinate supports it
+    in_ms = data.assign_coords(time=("time", np.arange(1000) * 2.0, {"units": "ms"}))
+    BandpassFilterTransform(8, 30, fs=500).transform(DataContainer(in_ms.assign_attrs(sfreq=1.0)))

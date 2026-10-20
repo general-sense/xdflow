@@ -574,3 +574,42 @@ def test_metric_functions_that_need_scores_are_refused(model, X, y):
 def test_metadata_columns_named_like_result_columns_are_refused(model, X, y, name):
     with pytest.raises(ValueError, match=name):
         evaluate(model, X, y, cv=3, metadata=pd.DataFrame({name: np.arange(120) % 5}))
+
+
+def test_an_ensemble_of_members_that_reorder_trials_keeps_predictions_on_their_trials():
+    from sklearn.model_selection import StratifiedKFold
+    from sklearn.neighbors import KNeighborsClassifier
+
+    from xdflow import EnsemblePredictor, Pipeline
+    from xdflow.transforms.function_step import step as make_step
+
+    @make_step
+    def reverse(data):
+        return data.isel(trial=slice(None, None, -1))
+
+    labels = np.array(["a", "b"])[np.arange(60) % 2]
+    X = (labels == "b").astype(float)[:, None] + np.zeros((60, 2))
+
+    def member():
+        knn = SKLearnPredictor(KNeighborsClassifier, sample_dim="trial", target_coord="y", n_neighbors=1)
+        return Pipeline("m", [("reverse", reverse()), ("knn", knn)])
+
+    ensemble = EnsemblePredictor([("one", member()), ("two", member())], sample_dim="trial", target_coord="y")
+    result = evaluate(Pipeline("ens", [("ens", ensemble)]), X, labels, cv=StratifiedKFold(3))
+    np.testing.assert_allclose(result.fold_scores, 1.0)
+
+
+def test_by_reports_undefined_metrics_as_nan():
+    from sklearn.dummy import DummyClassifier
+    from sklearn.model_selection import StratifiedKFold
+
+    y = np.arange(12) % 2
+    result = evaluate(
+        DummyClassifier(strategy="constant", constant=0),
+        np.zeros((12, 2)),
+        y,
+        cv=StratifiedKFold(3),
+        scoring="precision",
+        metadata=pd.DataFrame({"subject": np.repeat([0, 1], 6)}),
+    )
+    assert result.by("subject")["precision"].isna().all()  # no positive predictions: precision is undefined

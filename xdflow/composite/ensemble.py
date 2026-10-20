@@ -571,7 +571,7 @@ class EnsemblePredictor(CompositeTransform, Predictor):
                 )
                 for member in self.members
             ]
-            return Parallel(n_jobs=self.n_jobs)(tasks)
+            return self._in_input_order(Parallel(n_jobs=self.n_jobs)(tasks), original_container)
 
         outputs: list[DataContainer] = []
         for member in self.members:
@@ -584,7 +584,19 @@ class EnsemblePredictor(CompositeTransform, Predictor):
                     kwargs=dict(kwargs),
                 )
             )
-        return outputs
+        return self._in_input_order(outputs, original_container)
+
+    def _in_input_order(self, outputs: list[DataContainer], container: DataContainer) -> list[DataContainer]:
+        """Member outputs in the input's trial order: members are aggregated by position, and a member pipeline may
+        reorder trials."""
+        trials = container.data[self.sample_dim].values
+        return [
+            DataContainer(output.data.sel({self.sample_dim: trials}))
+            if self.sample_dim in output.data.indexes
+            and not np.array_equal(output.data[self.sample_dim].values, trials)
+            else output
+            for output in outputs
+        ]
 
     def predict(self, container: DataContainer, **kwargs) -> DataContainer:
         """

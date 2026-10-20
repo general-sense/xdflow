@@ -661,7 +661,12 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
                 # Each target's probability of 1, found by its classes (a target trained on 0 alone has one column,
                 # for 0). Multi-output estimators, native or wrapped, list one classes_ array per target.
                 classes = getattr(self.estimator, "classes_", None)
-                per_target = classes if isinstance(classes, list) and len(classes) == len(raw_probabilities) else None
+                if not isinstance(
+                    classes, list
+                ):  # e.g. per-target estimators fitted one by one (LightGBM early stopping)
+                    classes = [getattr(est, "classes_", None) for est in getattr(self.estimator, "estimators_", [])]
+                complete = len(classes) == len(raw_probabilities) and all(c is not None for c in classes)
+                per_target = classes if complete else None
                 probabilities = np.column_stack(
                     [
                         _positive_class_probability(p, per_target[i] if per_target is not None else None)

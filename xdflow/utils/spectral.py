@@ -72,22 +72,25 @@ def get_freq_band_indices(frequencies, low, high):
 
 
 def check_sampling_rate(data: Any, fs: float, name: str) -> None:
-    """Raise when ``fs`` contradicts the data's sampling rate, as stated by both ``attrs["sfreq"]`` (set by
-    ``from_mne_epochs``) and the spacing of the time coordinate in seconds. Filtering at the wrong rate shifts every
-    frequency without any other sign. Either alone can be stale (a step that decimates keeps attrs; time converted
-    to ms keeps its units), so nothing is checked when they disagree."""
-    sfreq, time = data.attrs.get("sfreq"), data.coords.get("time")
+    """Raise when no evidence of the data's sampling rate supports ``fs``. Evidence is ``attrs["sfreq"]`` (set by
+    ``from_mne_epochs``) and the spacing of a time coordinate in seconds or milliseconds (or without units, next to
+    an ``attrs["sfreq"]``). Either can be stale (a step that decimates keeps attrs; time converted to ms may keep
+    units of seconds), so ``fs`` passes if it matches any of them. Filtering at the wrong rate shifts every frequency
+    without any other sign."""
+    rates = []
     try:
-        sfreq = None if sfreq is None else float(sfreq)
-    except (TypeError, ValueError):  # not a number ("250 Hz"): nothing to check against
-        sfreq = None
-    if sfreq is None or time is None or time.size < 2 or not np.issubdtype(time.dtype, np.number):
-        return
-    spacing = float(np.median(np.diff(np.asarray(time.values, dtype=float))))
-    if spacing <= 0 or not np.isclose(1.0 / spacing, float(sfreq), rtol=1e-3):
-        return
-    if not np.isclose(float(sfreq), float(fs), rtol=1e-3):
+        if data.attrs.get("sfreq") is not None:
+            rates.append(float(data.attrs["sfreq"]))
+    except (TypeError, ValueError):  # not a number ("250 Hz")
+        pass
+    time = data.coords.get("time")
+    if time is not None and time.size > 1 and np.issubdtype(time.dtype, np.number):
+        spacing = float(np.median(np.diff(np.asarray(time.values, dtype=float))))
+        per_second = {"s": 1.0, "ms": 1000.0}.get(time.attrs.get("units"), 1.0 if rates else None)
+        if spacing > 0 and per_second is not None:
+            rates.append(per_second / spacing)
+    if rates and not any(np.isclose(rate, float(fs), rtol=1e-3) for rate in rates):
+        evidence = ", ".join(f"{rate:g} Hz" for rate in rates)
         raise ValueError(
-            f"{name} has fs={fs} Hz, but the data is sampled at {float(sfreq):g} Hz (attrs['sfreq'] and the time "
-            "coordinate agree)."
+            f"{name} has fs={fs} Hz, but the data is sampled at {evidence} (attrs['sfreq'], time coordinate)."
         )
