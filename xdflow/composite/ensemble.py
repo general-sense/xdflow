@@ -468,6 +468,7 @@ class EnsemblePredictor(CompositeTransform, Predictor):
             try:
                 # Get predictions from this member's transform
                 predictions = _as_predictive_transform(member.transform).predict(calibration_container, **kwargs)
+                (predictions,) = self._in_input_order([predictions], calibration_container)  # members may reorder
                 pred_values = predictions.data.values
 
                 # Ensure both target and prediction data are compatible for scoring

@@ -348,3 +348,20 @@ def test_new_data_with_float_labels_a_few_ulps_off_is_accepted(X, y):
     np.testing.assert_array_equal(
         fitted.predict(DataContainer(nudged)).data.values, fitted.predict(DataContainer(unlabeled)).data.values
     )
+
+
+def test_float_labels_that_really_differ_are_not_matched():
+    import xarray as xr
+
+    from xdflow import DataContainer
+
+    rng = np.random.default_rng(0)
+    freqs = np.array([1.04, 2.0, 3.0, 1e5])
+    data = xr.DataArray(
+        rng.normal(size=(40, 4)), dims=("trial", "freq"), coords={"freq": freqs, "label": ("trial", np.arange(40) % 2)}
+    )
+    pipeline = make_pipeline(SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label"))
+    fitted = pipeline.fit(DataContainer(data))
+    moved = data.drop_vars("label").assign_coords(freq=np.array([1.0, 2.0, 3.0, 1e5]))
+    with pytest.raises(Exception, match="missing"):
+        fitted.predict(DataContainer(moved))

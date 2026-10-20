@@ -190,7 +190,9 @@ class SKLearnTransform(Transform, SampleWeightMixin):
             if (
                 positions < 0
             ).any():  # float labels rebuilt elsewhere (np.linspace, float32) can differ in the last bits
-                approximate, approximate_fitted = _approximate_labels(data.indexes[dim]), _approximate_labels(fitted)
+                scale = _float_scale(fitted, data.indexes[dim])
+                approximate = _approximate_labels(data.indexes[dim], scale)
+                approximate_fitted = _approximate_labels(fitted, scale)
                 if approximate.is_unique and approximate_fitted.is_unique:
                     positions = approximate.get_indexer(approximate_fitted)
             if (positions < 0).any():
@@ -740,15 +742,30 @@ def _positive_class_probability(probabilities: np.ndarray, classes: Any) -> np.n
     raise ValueError(f"Multilabel targets must be binary; one has classes {classes.tolist()}.")
 
 
-def _approximate_labels(index: pd.Index) -> pd.Index:
-    """Float labels (or float levels) rounded to 7 digits of their largest magnitude, float32's precision."""
+def _float_scale(*indexes: pd.Index) -> float:
+    """Largest float magnitude among the indexes (or their float levels)."""
+    largest = 0.0
+    for index in indexes:
+        levels = (
+            [index.get_level_values(i) for i in range(index.nlevels)] if isinstance(index, pd.MultiIndex) else [index]
+        )
+        for level in levels:
+            values = np.asarray(level)
+            if np.issubdtype(values.dtype, np.floating) and np.isfinite(values).any():
+                largest = max(largest, float(np.nanmax(np.abs(values))))
+    return largest
+
+
+def _approximate_labels(index: pd.Index, scale: float) -> pd.Index:
+    """Float labels (or float levels) rounded to 7 significant digits each (float32's precision); values below
+    1e-9 of the largest label across both indexes count as 0."""
 
     def rounded(values: Any) -> np.ndarray:
         values = np.asarray(values)
-        if not np.issubdtype(values.dtype, np.floating) or not np.isfinite(values).any():
+        if not np.issubdtype(values.dtype, np.floating):
             return values
-        scale = float(np.nanmax(np.abs(values))) or 1.0
-        return np.round(values.astype(float), 6 - int(np.floor(np.log10(scale))))
+        values = np.where(np.abs(values) < 1e-9 * scale, 0.0, values.astype(float))
+        return np.array([float(f"{value:.7g}") for value in values])
 
     if isinstance(index, pd.MultiIndex):
         return pd.MultiIndex.from_arrays([rounded(index.get_level_values(level)) for level in range(index.nlevels)])

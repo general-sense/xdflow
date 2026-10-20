@@ -154,3 +154,39 @@ def test_the_tuner_leaves_the_objects_it_was_given_unchanged():
     Tuner(pipeline, validator, {pipeline.name: {"randomforestclassifier": {"n_estimators": [5, 6]}}}, data, verbose=0)
     assert validator.random_state == 3
     assert pipeline.steps[0].transform.get_params()["random_state"] == 42
+
+
+def test_run_tuning_pipeline_reports_the_score_of_the_tuned_validator(capsys):
+    from sklearn.linear_model import LogisticRegression
+
+    from xdflow import run_tuning_pipeline
+
+    rng = np.random.default_rng(0)
+    event = np.where(rng.random(200) < 0.4, "intertrial", "stim")
+    label = np.where(event == "intertrial", "rest", np.array(["a", "b"])[rng.integers(0, 2, 200)])
+    values = rng.normal(size=(200, 4)) + (label == "a")[:, None] * 1.5
+    data = DataContainer(
+        xr.DataArray(
+            values,
+            dims=("trial", "feature"),
+            coords={"trial": np.arange(200), "label": ("trial", label), "event_type": ("trial", event)},
+        )
+    )
+    pipeline = Pipeline("p", [("lr", SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label"))])
+
+    def validator(**kwargs):
+        return KFoldValidator(n_splits=4, shuffle=True, random_state=0, scoring="accuracy", verbose=False, **kwargs)
+
+    run_tuning_pipeline(
+        pipeline,
+        validator(),
+        {"p": {"lr": {"C": [1.0]}}},
+        data,
+        n_trials=1,
+        score_on_holdout=False,
+        exclude_intertrial_from_scoring=True,
+        return_pipelines=False,
+    )
+    oracle = validator(exclude_intertrial_from_scoring=True)
+    oracle.set_pipeline(pipeline.clone())
+    assert f"{oracle.cross_validate(data):.4f}" in capsys.readouterr().out

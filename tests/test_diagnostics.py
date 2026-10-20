@@ -207,3 +207,11 @@ def test_mixed_type_trial_labels_are_audited():
     data = from_numpy(np.arange(8.0).reshape(4, 2), ("trial", "feature"), subject=[0, 0, 1, 1]).data
     data = data.assign_coords(trial=np.array([1, "a", 2, "b"], dtype=object))
     assert check_split(data, [([0, 1], [2, 3])]).ok
+
+
+def test_source_trials_are_scoped_by_session():
+    # orig_trial restarts in every session: (session, orig_trial) is the source trial
+    info = pd.DataFrame({"session": np.repeat([1, 2], 30), "orig_trial": np.tile(np.repeat(np.arange(10), 3), 2)})
+    sessions_apart = [(np.arange(30), np.arange(30, 60))]
+    report = check_split(np.random.default_rng(0).normal(size=(60, 2)), sessions_apart, metadata=info)
+    assert "orig_trial" not in report.shared_coords

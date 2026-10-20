@@ -355,10 +355,14 @@ class MultiTaperTransform(Transform):
 
 
 class BandpassFilterTransform(Transform):  # TODO: rename or combine with BandpassFilterBandTransform
-    """
-    Apply bandpass filtering, replacing the original data with the filtered data.
-    The dimensions stay the same (useful for reference-sensor filtering).
+    """Zero-phase Butterworth band-pass filter (order 4, applied forward and backward with ``filtfilt``) along
+    ``time``, replacing the data with the filtered data; dims stay the same.
 
+    Args:
+        lowcut: Lower cutoff in Hz.
+        highcut: Upper cutoff in Hz, below the Nyquist frequency ``fs / 2``.
+        fs: Sampling rate in Hz. It must match the data: when the data records its rate (``attrs["sfreq"]``, as
+            from ``from_mne_epochs``, or a time coordinate), a contradicting ``fs`` raises.
     """
 
     is_stateful: bool = False
@@ -380,6 +384,8 @@ class BandpassFilterTransform(Transform):  # TODO: rename or combine with Bandpa
         self.fs = fs
         self.lowcut = lowcut
         self.highcut = highcut
+        if fs is None:
+            raise ValueError("fs, the sampling rate in Hz, is required.")
 
         # Validate frequency bounds
         if self.highcut >= self.fs / 2:

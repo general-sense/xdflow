@@ -212,8 +212,9 @@ def audit_splits(
         values = np.asarray(data.coords[name].values)
         kind = _grouping_kind(name)
         # Ids are often reused: session 1 of every subject, run 0 of every session. Compare them within those.
-        parents = [subject_coord] if subject_coord is not None and kind in ("recording", "run") else []
-        parents += session_coords if kind == "run" else []
+        # Source trials (orig_trial) restart within a session too.
+        parents = [subject_coord] if subject_coord is not None and kind in ("recording", "run", "source") else []
+        parents += session_coords if kind in ("run", "source") else []
         scoped = bool(parents)
         if scoped:
             keys = [np.asarray(data.coords[parent].values) for parent in parents]

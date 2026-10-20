@@ -165,3 +165,24 @@ def test_bandpass_refuses_an_fs_that_no_evidence_supports():
     BandpassFilterTransform(8, 30, fs=500).transform(DataContainer(data))  # the time coordinate supports it
     in_ms = data.assign_coords(time=("time", np.arange(1000) * 2.0, {"units": "ms"}))
     BandpassFilterTransform(8, 30, fs=500).transform(DataContainer(in_ms.assign_attrs(sfreq=1.0)))
+
+
+def test_bandpass_checks_fs_against_a_time_coordinate_without_units():
+    import xarray as xr
+
+    from xdflow import DataContainer
+    from xdflow.transforms.spectral import BandpassFilterTransform
+
+    def data(time):
+        return DataContainer(
+            xr.DataArray(np.zeros((2, 3, time.size)), dims=("trial", "channel", "time"), coords={"time": time})
+        )
+
+    seconds_50hz = data(np.arange(128) / 50.0)
+    with pytest.raises(ValueError, match="100"):
+        BandpassFilterTransform(1, 15, fs=100).transform(seconds_50hz)
+    BandpassFilterTransform(1, 15, fs=50).transform(seconds_50hz)
+    BandpassFilterTransform(8, 30, fs=256).transform(data(np.arange(256) * 1000 / 256))  # ms
+    BandpassFilterTransform(8, 30, fs=160).transform(data(np.arange(320.0)))  # sample indices: nothing to check
+    with pytest.raises(ValueError, match="fs"):
+        BandpassFilterTransform(1, 15, fs=None)
