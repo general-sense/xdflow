@@ -12,9 +12,7 @@ import inspect
 import json
 import os
 import pickle
-import pickletools
 import shutil
-import sys
 import sysconfig
 import threading
 import time
@@ -364,24 +362,48 @@ def cache_user_code() -> bool:
 
 
 def references_user_code(*objects: Any) -> bool:
-    """Whether the objects refer to code from user modules: functions, classes or callables written by the user,
-    wherever they sit (parameters, wrapped estimators, scorers, partials, data attrs).
+    """Whether the objects involve code from user modules: functions, classes or callables written by the user,
+    wherever they sit (parameters, wrapped estimators, scorers, partials, object arrays, data attrs).
 
-    Pickling records every function and class it cannot store by value as a reference to its module, so the
-    references in the pickled objects are exactly the code they depend on. Objects that cannot be pickled (lambdas,
-    local functions) count as user code. For data, only attrs are checked (not ``data_history``, which records the
-    steps already applied: the data values hold their results).
+    The objects are walked by pickling them, which reaches everything they hold; each object reached is checked by
+    its own class (or itself, for functions and classes), so a custom reduction cannot hide it. Objects that cannot
+    be pickled (lambdas, local functions) count as user code. For data, only attrs are checked, not
+    ``data_history``, which records the steps already applied (the data values hold their results).
+    shortcut: user code reached only through a library registry (e.g. an xarray accessor called by name) is not seen.
     """
     carriers = [
         {k: v for k, v in obj.data.attrs.items() if k != "data_history"} if isinstance(obj, DataContainer) else obj
         for obj in objects
     ]
+    finder = _UserCodeFinder(_Discard(), protocol=pickle.HIGHEST_PROTOCOL)
     try:
-        payload = pickle.dumps(carriers, protocol=2)  # protocol 2 names each reference in a GLOBAL opcode
+        finder.dump(carriers)
+    except _UserCodeFoundError:
+        return True
     except Exception:
         return True
-    modules = {arg.split(" ", 1)[0] for opcode, arg, _ in pickletools.genops(payload) if opcode.name == "GLOBAL"}
-    return any(name in sys.modules and _is_user_code(sys.modules[name]) for name in modules)
+    return False
+
+
+class _UserCodeFoundError(Exception):
+    pass
+
+
+class _Discard:
+    def write(self, data: bytes) -> int:
+        return len(data)
+
+
+class _UserCodeFinder(pickle.Pickler):
+    """Pickles to nowhere, stopping at the first object from user code."""
+
+    def reducer_override(self, obj: Any) -> Any:
+        if isinstance(obj, np.ndarray) and obj.dtype != object:
+            return int, ()  # numbers carry no code: skip serializing them
+        code = obj if inspect.isclass(obj) or inspect.isroutine(obj) else type(obj)
+        if _is_user_code(code):
+            raise _UserCodeFoundError
+        return NotImplemented
 
 
 def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
@@ -446,11 +468,10 @@ def _is_user_code(obj: Any) -> bool:
     """Defined in code users edit: a script, their own modules or a notebook. A function is judged by the file its
     code comes from, since functools.wraps copies another function's module."""
     code = getattr(obj, "__code__", None)
-    if code is not None:
-        source = code.co_filename
-        if source.startswith("<"):  # exec, stdin, some notebook frontends; "<frozen os>" is the standard library
-            return not source.startswith("<frozen")
-    else:
+    source = getattr(code, "co_filename", None)
+    if source is not None and source.startswith("<"):  # exec, stdin, notebook frontends; "<frozen os>" is stdlib
+        return not source.startswith("<frozen")
+    if source is None or not os.path.isabs(source):  # no code, or compiled code naming its .pyx relatively
         module = obj if inspect.ismodule(obj) else inspect.getmodule(obj)
         source = getattr(module, "__file__", None)
         if source is None:  # a notebook's __main__, or a built-in module

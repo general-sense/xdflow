@@ -154,16 +154,11 @@ def _as_container(
         # position: refuse rather than guess.
         trials = data.indexes.get("trial") if own_trial_labels else None
         index = metadata.index
-        if (
-            trials is not None
-            and not isinstance(index, pd.RangeIndex)
-            and index.is_unique
-            and len(index) == len(trials)
-        ):
-            rows = index.get_indexer(trials)  # one matching rule (pandas labels) for "same labels" and "same order"
-        else:
-            rows = None
-        if rows is not None and (rows >= 0).all() and not (rows == np.arange(len(rows))).all():
+        # Labels must match one to one (intervals match by containment, so they never name trials).
+        exact = not isinstance(index, (pd.RangeIndex, pd.IntervalIndex)) and index.is_unique
+        rows = index.get_indexer(trials) if trials is not None and exact and len(index) == len(trials) else None
+        one_to_one = rows is not None and bool((rows >= 0).all()) and np.unique(rows).size == rows.size
+        if one_to_one and not (rows == np.arange(rows.size)).all():
             raise ValueError(
                 "metadata is indexed by the trial labels, in another order than the data's trials. Reorder it "
                 "(metadata.loc[data.trial.values]), or drop its index (metadata.reset_index(drop=True)) if its rows "

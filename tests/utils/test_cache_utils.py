@@ -371,6 +371,7 @@ def test_user_code_is_found_wherever_it_sits():
     from types import ModuleType
 
     import scipy.special
+    import scipy.special.cython_special
     from sklearn.linear_model import Ridge
     from sklearn.metrics import make_scorer
     from sklearn.model_selection import GridSearchCV
@@ -403,6 +404,7 @@ def test_user_code_is_found_wherever_it_sits():
     for builtin in (
         Pipeline("p", [("step", IdentityTransform())]),
         functools.partial(xr.apply_ufunc, scipy.special.expit),
+        functools.partial(xr.apply_ufunc, scipy.special.cython_special.expit),  # compiled: relative .pyx name
         FunctionTransform(np.abs),
     ):
         assert not references_user_code(builtin), builtin
@@ -411,3 +413,34 @@ def test_user_code_is_found_wherever_it_sits():
 class _UserCallable:
     def __call__(self, x):
         return x * 2
+
+
+class _HidesItsClass:
+    factor = 2
+
+    def __call__(self, x):
+        return x * type(self).factor
+
+    def __reduce__(self):  # pickles as a library partial: the user class never appears in the pickle
+        import functools
+        import operator
+
+        return functools.partial, (operator.mul, 2)
+
+
+class _Absolute:
+    def __abs__(self):
+        return 1
+
+
+def test_user_code_is_found_through_custom_reductions_and_object_arrays():
+    import time
+
+    from xdflow.utils.cache_utils import references_user_code
+
+    assert references_user_code(_HidesItsClass())
+    assert references_user_code(np.array([_Absolute()], dtype=object))
+    big = DataContainer(xr.DataArray(np.ones((2, 2)), dims=("trial", "f"), attrs={"calibration": np.ones(4_000_000)}))
+    start = time.perf_counter()
+    assert not references_user_code(big)
+    assert time.perf_counter() - start < 0.05  # numeric arrays are not serialized to be checked

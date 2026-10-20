@@ -373,3 +373,14 @@ def test_metadata_label_checks_compare_labels_by_value(kind):
             _as_container(data, metadata=rows)
     else:
         np.testing.assert_array_equal(_as_container(data, metadata=rows).data.subject.values, [20, 0, 10])
+
+
+def test_metadata_rows_by_position_when_labels_only_partly_match():
+    from xdflow.interop import _as_container
+
+    data = xr.DataArray(np.arange(3.0)[:, None], dims=("trial", "f"), coords={"trial": ["a", "a", "b"]})
+    rows = pd.DataFrame({"subject": [1, 2, 3]}, index=["a", "b", "c"])
+    np.testing.assert_array_equal(_as_container(data, metadata=rows).data.subject.values, [1, 2, 3])
+    data = xr.DataArray(np.arange(3.0)[:, None], dims=("trial", "f"), coords={"trial": [0.5, 1.5, 2.5]})
+    rows = pd.DataFrame({"subject": [1, 2, 3]}, index=pd.IntervalIndex.from_tuples([(1, 2), (2, 3), (0, 1)]))
+    np.testing.assert_array_equal(_as_container(data, metadata=rows).data.subject.values, [1, 2, 3])
