@@ -91,8 +91,8 @@ they don't crash. They just give you a wrong number.
 
 In xdflow, every step addresses the data by name:
 
-- **Time by value:** `CropTimeTransform(0.5, 4.0)` selects 0.5–4.0 s from the time coordinate, not an index
-  range you computed by hand. A window that selects nothing raises.
+- **Time by value:** `CropTimeTransform(0.5, 4.0)` selects 0.5–4.0 on the time coordinate (seconds for MNE
+  epochs), not an index range you computed by hand. A window that selects nothing raises.
 - **Dimensions by name:** `per_dim="trial"`, `dims=("channel", "time")`, never `axis=2`. A misspelled
   dimension raises instead of silently pooling over everything.
 - **Channels and features by name:** every fitted step (spatial filters, PCA, whitening, your scikit-learn

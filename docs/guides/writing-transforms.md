@@ -26,7 +26,7 @@ from xdflow import SKLearnPredictor, make_pipeline, step
 
 @step
 def log_band_power(data: xr.DataArray, band=(8.0, 30.0)) -> xr.DataArray:
-    """Mean log power in a frequency band, per trial and channel."""
+    """Log of the mean power in a frequency band, per trial and channel."""
     return np.log((data.sel(freq=slice(*band)) ** 2).mean("freq"))
 
 
