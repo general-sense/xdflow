@@ -135,7 +135,8 @@ def check_split(
         X: NumPy array (samples first), ``xr.DataArray``, ``DataContainer`` or MNE ``Epochs``.
         cv: What scikit-learn's ``cross_val_score`` accepts: an int (stratified K-fold for class labels, as
             in scikit-learn), a splitter, or ``(train, test)`` index pairs. Also accepts an xdflow validator
-            that has already run ``cross_validate`` (its recorded splits are audited).
+            that has already run ``cross_validate`` (its recorded splits are audited, and its holdout against
+            the rest of the data as the last split).
         y: Target, as a trial coordinate name or one value per sample; used by stratified splitters.
         groups: Groups passed to the splitter, as a coordinate name or one value per sample. Always audited.
         metadata: DataFrame with one row per sample; its columns are audited when their names are recognised
@@ -165,7 +166,10 @@ def check_split(
             raise ValueError("y and groups are taken from the validator's own configuration; do not pass them.")
         if not cv.split_trials_:
             raise ValueError("This validator has not run yet; call cross_validate() first, or pass a splitter.")
-        split_trials = cv.split_trials_
+        split_trials = list(cv.split_trials_)
+        holdout = cv.holdout_trial_labels_
+        if holdout is not None and len(holdout):  # the holdout against everything else, as one more split
+            split_trials.append((trials[~np.isin(trials, holdout)], np.asarray(holdout)))
         groups_name = getattr(cv, "group_coord", None)
     else:
         y_values = data.coords[y_name].values if y_name else None

@@ -74,7 +74,7 @@ def get_freq_band_indices(frequencies, low, high):
 
 def check_sampling_rate(data: Any, fs: float, name: str) -> None:
     """Warn when no evidence of the data's sampling rate supports ``fs``. Evidence is ``attrs["sfreq"]`` (set by
-    ``from_mne_epochs``) and the spacing of a time coordinate in seconds or milliseconds (without units: seconds, ms
+    ``from_mne_epochs``) and the spacing of a time coordinate in seconds, ms or µs (without units: seconds, ms
     or µs, unless the spacing is a whole number, as for sample indices). Either can be stale (a step that decimates
     keeps attrs; time converted to ms may keep units of seconds), so ``fs`` passes if it matches any of them."""
     rates = []
@@ -89,8 +89,9 @@ def check_sampling_rate(data: Any, fs: float, name: str) -> None:
         # over the whole span: neighbouring steps may be rounded (timestamps in whole ms) or float32
         spacing = (values[-1] - values[0]) / (values.size - 1) if np.all(np.diff(values) > 0) else 0.0
         units = time.attrs.get("units")
-        if spacing > 0 and units in ("s", "ms"):
-            rates.append({"s": 1.0, "ms": 1000.0}[units] / spacing)
+        per_unit = {"s": 1.0, "ms": 1e3, "us": 1e6, "µs": 1e6}
+        if spacing > 0 and units in per_unit:
+            rates.append(per_unit[units] / spacing)
         elif spacing > 0 and units is None and (rates or not float(spacing).is_integer()):
             # Without units: seconds, ms or µs. An integer spacing alone is likely sample indices, not a time.
             rates.extend(per_second / spacing for per_second in (1.0, 1e3, 1e6))

@@ -365,3 +365,16 @@ def test_float_labels_that_really_differ_are_not_matched():
     moved = data.drop_vars("label").assign_coords(freq=np.array([1.0, 2.0, 3.0, 1e5]))
     with pytest.raises(Exception, match="missing"):
         fitted.predict(DataContainer(moved))
+    whole = data.assign_coords(freq=np.array([1.5, 2.5, 12345678.0, 1e9]))  # whole numbers are exact labels
+    fitted = pipeline.fit(DataContainer(whole))
+    with pytest.raises(Exception, match="missing"):
+        fitted.predict(DataContainer(whole.drop_vars("label").assign_coords(freq=[1.5, 2.5, 12345679.0, 1e9])))
+
+
+def test_predicted_labels_that_only_equal_a_class_after_rounding_are_refused():
+    from sklearn.preprocessing import LabelEncoder
+
+    predictor = SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label", fit_on_labels=True)
+    predictor.encoder = LabelEncoder().fit(np.array([2.0**53]))
+    with pytest.raises(ValueError, match="not among the training labels"):
+        predictor._to_codes(np.array([2**53 + 1], dtype=np.int64))  # int64 == float64 compares it as 2.0**53

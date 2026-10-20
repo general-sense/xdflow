@@ -79,3 +79,61 @@ def test_holdout_ids_can_be_a_single_value_and_are_checked_once():
         Pipeline("q", [("gs", SKLearnPredictor.from_estimator(search, sample_dim="trial", target_coord="label"))])
     )
     outer.cross_validate(data)
+
+
+def _fitted(validator, data):
+    validator.set_pipeline(
+        Pipeline("p", [("lr", SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label"))])
+    )
+    return validator.cross_validate(data)
+
+
+def test_trial_numbers_restarting_in_each_subject_are_different_trials():
+    # orig_trial 0..3 in every subject: ten subjects of four trials, not four trials
+    data = from_numpy(
+        np.random.default_rng(0).normal(size=(40, 2)),
+        label=np.tile([0, 1], 20),
+        orig_trial=np.tile(np.arange(4), 10),
+        subject=np.repeat(np.arange(10), 4),
+        session=np.zeros(40),
+    )
+    _fitted(GroupedKFoldValidator(5, group_coord="subject", stratify_by_group=False, verbose=False), data)
+
+
+@pytest.mark.parametrize(
+    "validator, coord",
+    [
+        (
+            SampledDomainKFoldValidator(domain_coord="domain", target_domains="target", n_splits=2, verbose=False),
+            "domain",
+        ),
+        (GroupedKFoldValidator(2, group_coord="part", train_groups=["a"], val_groups=["b"], verbose=False), "part"),
+    ],
+    ids=["domain", "groups"],
+)
+def test_windows_of_one_trial_across_a_split_boundary_are_refused(validator, coord):
+    # each trial has windows on both sides: training on its "a"/source windows would test on the trial itself
+    n = 20
+    data = from_numpy(
+        np.random.default_rng(0).normal(size=(2 * n, 2)),
+        label=np.repeat(np.arange(n) % 2, 2),
+        orig_trial=np.repeat(np.arange(n), 2),
+        domain=np.tile(["source", "target"], n),
+        part=np.tile(["a", "b"], n),
+    )
+    with pytest.raises(ValueError, match=f"different '{coord}'"):
+        _fitted(validator, data)
+
+
+def test_labels_varying_within_a_trial_disable_stratification():
+    labels = np.zeros((12, 2), dtype=int)
+    labels[:3, 1] = 1  # class 1 only on the second window of three trials
+    data = from_numpy(
+        np.random.default_rng(0).normal(size=(24, 2)),
+        label=labels.ravel(),
+        orig_trial=np.repeat(np.arange(12), 2),
+        subject=np.zeros(24),
+    )
+    validator = GroupedKFoldValidator(3, group_coord="subject", stratify_by_group=False, verbose=False)
+    with pytest.warns(UserWarning, match="vary within windows of one trial"):
+        _fitted(validator, data)

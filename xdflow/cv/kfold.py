@@ -3,7 +3,7 @@ from collections.abc import Callable, Hashable, Iterator
 from typing import cast
 
 import numpy as np
-from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 
 from xdflow.core.data_container import DataContainer
 from xdflow.cv.base import CrossValidator
@@ -359,6 +359,8 @@ class GroupedKFoldValidator(CrossValidator):
 
         all_trials = container.data.trial.values
         all_groups = container.data.coords[self.group_coord].values
+        if self.test_groups is not None or self.train_groups is not None or self.val_groups is not None:
+            self._refuse_units_across(container.data, all_groups, f"'{self.group_coord}'")
 
         if self.test_size is None or self.test_size == 0:
             # No holdout set - use all data for cross-validation
@@ -421,6 +423,8 @@ class GroupedKFoldValidator(CrossValidator):
         # Select the relevant part of the container first
         cv_container = container.data.sel(trial=indices_to_split)
         cv_groups = cv_container.coords[self.group_coord].values
+        if self.train_groups is not None or self.val_groups is not None:
+            self._refuse_units_across(cv_container, cv_groups, f"'{self.group_coord}'")
 
         # Now get labels directly from this smaller container
         # Determine stratification coordinate (use stratify_coord if set, otherwise use final_target_coord_)
@@ -437,6 +441,8 @@ class GroupedKFoldValidator(CrossValidator):
 
         # skf.split works on integer positions, so we map back to trial IDs
         units, unit_labels, to_trials = self._split_units(cv_container, stratify_labels)
+        if unit_labels is None:
+            skf = KFold(n_splits=self.n_splits, shuffle=self.shuffle, random_state=self.random_state)
         for train_units, val_units in skf.split(units, unit_labels):
             train_pos, val_pos = to_trials(train_units), to_trials(val_units)
             # keep only indices that are relevant to the specified groups

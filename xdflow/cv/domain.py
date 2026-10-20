@@ -100,6 +100,7 @@ class SampledDomainKFoldValidator(CrossValidator):
             source_mask = np.isin(domain_values, np.asarray(self.source_domains))
         if np.any(source_mask & target_mask):
             raise ValueError("source_domains and target_domains must not overlap.")
+        self._refuse_units_across(container.data, target_mask, f"'{self.domain_coord}' (target or not)")
 
         if not target_mask.any():
             raise ValueError(
@@ -191,9 +192,11 @@ class SampledDomainKFoldValidator(CrossValidator):
                 stratify_coord = self._resolve_label_coord(container)
 
         labels = container.data.coords[stratify_coord].values[target_mask] if stratify_coord else None
-        if labels is not None:
-            self._validate_stratify_labels(labels, n_splits=None, test_size=self.test_size, context="holdout split")
         units, unit_labels, to_trials = self._split_units(container.data.sel(trial=target_trials), labels)
+        if unit_labels is not None:  # counted per unit: the windows of one trial are split together
+            self._validate_stratify_labels(
+                unit_labels, n_splits=None, test_size=self.test_size, context="holdout split"
+            )
         _, holdout_units = train_test_split(
             units, test_size=self.test_size, stratify=unit_labels, random_state=self.random_state
         )
@@ -231,16 +234,17 @@ class SampledDomainKFoldValidator(CrossValidator):
             stratify_coord = label_coord
 
         target_data = cv_container.sel(trial=target_trials)
+        labels_target = None
         if stratify_coord:
             if stratify_coord not in cv_container.coords:
                 raise ValueError(f"Stratification coord '{stratify_coord}' not found in container coords.")
             labels_target = cv_container.coords[stratify_coord].values[target_mask]
-            self._validate_stratify_labels(labels_target, n_splits=self.n_splits, test_size=None, context="CV split")
-            units, unit_labels, to_trials = self._split_units(target_data, labels_target)
+        units, unit_labels, to_trials = self._split_units(target_data, labels_target)
+        if unit_labels is not None:  # counted per unit: the windows of one trial are split together
+            self._validate_stratify_labels(unit_labels, n_splits=self.n_splits, test_size=None, context="CV split")
             splitter = StratifiedKFold(n_splits=self.n_splits, shuffle=self.shuffle, random_state=self.random_state)
             splits = splitter.split(units, unit_labels)
         else:
-            units, _, to_trials = self._split_units(target_data, None)
             splitter = KFold(n_splits=self.n_splits, shuffle=self.shuffle, random_state=self.random_state)
             splits = splitter.split(units)
 

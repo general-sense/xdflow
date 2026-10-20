@@ -149,6 +149,8 @@ def test_bandpass_checks_the_rate_only_when_data_and_metadata_agree():
 
 
 def test_bandpass_refuses_an_fs_that_no_evidence_supports():
+    import warnings
+
     import xarray as xr
 
     from xdflow import DataContainer
@@ -165,6 +167,10 @@ def test_bandpass_refuses_an_fs_that_no_evidence_supports():
     BandpassFilterTransform(8, 30, fs=500).transform(DataContainer(data))  # the time coordinate supports it
     in_ms = data.assign_coords(time=("time", np.arange(1000) * 2.0, {"units": "ms"}))
     BandpassFilterTransform(8, 30, fs=500).transform(DataContainer(in_ms.assign_attrs(sfreq=1.0)))
+    in_us = data.assign_coords(time=("time", np.arange(1000) * 2000.0, {"units": "us"}))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # the time coordinate in µs supports fs over the stale attrs
+        BandpassFilterTransform(8, 30, fs=500).transform(DataContainer(in_us))
 
 
 def test_bandpass_checks_fs_against_a_time_coordinate_without_units():

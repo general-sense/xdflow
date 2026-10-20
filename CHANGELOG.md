@@ -12,8 +12,8 @@ All notable changes to this project will be documented in this file.
   trial metadata, which steps ran once and which were refit per fold, and a split audit; warns when shuffled
   folds share subjects or sessions. Metric names follow scikit-learn.
 - `xdflow.check_split(X, cv, ...)`: audits any split (scikit-learn splitters, index pairs, or an xdflow
-  validator after `cross_validate`) for subjects, sessions, runs and source trials shared between training and
-  test sets, and for test samples with an exact copy in the training set.
+  validator after `cross_validate`, including its holdout) for subjects, sessions, runs and source trials shared
+  between training and test sets, and for test samples with an exact copy in the training set.
 - `@xdflow.step`: a function of an `xr.DataArray` becomes a pipeline step whose parameters clone, cache and
   tune like a built-in transform's. Inputs are read-only, each call checks that trials are processed
   independently, and `@step(fit=...)` adds state learned on training folds.
@@ -42,11 +42,14 @@ All notable changes to this project will be documented in this file.
   - `evaluate` refuses a DataFrame `X` with non-numeric columns, scikit-learn metric functions that need scores
     (`roc_auc_score`, `log_loss`), and trial coordinates named `fold`, `y_true` or `y_pred`.
 - `GroupedKFoldValidator` and `SampledDomainKFoldValidator` keep windows cut from one trial (`orig_trial`) on one
-  side of every split and of the holdout, as `KFoldValidator` already did.
+  side of every split and of the holdout, as `KFoldValidator` already did. Trial numbers are taken per subject and
+  session; stratification is turned off, with a warning, when labels vary among a trial's windows; and windows of
+  one trial with different domains (or groups, when `train_groups`, `val_groups` or `test_groups` is set) are
+  refused, since they would put the trial on both sides.
 - The Tuner works on copies of the pipelines and validator it is given, so seeding and tuning no longer change them.
 - Band-pass, multitaper and Hilbert phase transforms warn when `fs` matches neither `attrs["sfreq"]` nor the
-  spacing of the time coordinate (in seconds or milliseconds; without units, seconds, ms or µs unless the spacing is
-  a whole number, as for sample indices).
+  spacing of the time coordinate (in seconds, ms or µs; without units, any of them unless the spacing is a whole
+  number, as for sample indices).
 - `SKLearnPredictor(fit_on_labels=True)` fits the estimator on the class labels themselves; `evaluate` uses it for
   scikit-learn models.
 - Validators no longer cache fitted fold pipelines on disk by default (`use_stateful_fit_cache=False`): a

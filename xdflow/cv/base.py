@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterator
 from typing import Any, cast
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 from sklearn.metrics import (
     accuracy_score,
@@ -388,13 +389,31 @@ class CrossValidator(ABC):
 
     def _split_units(self, data, labels: np.ndarray | None) -> tuple[np.ndarray, np.ndarray | None, Callable]:
         """Windows cut from one trial (``orig_trial``) stay on one side of every split: the positions of the units
-        to split, their labels, and a function turning unit positions back into trial positions."""
+        to split, their labels (None if labels vary within a unit), and a function turning unit positions back into
+        trial positions."""
         groups = self._resolve_orig_trial_groups(data)
         if groups is None:
             return np.arange(data.sizes["trial"]), labels, lambda positions: positions
         _, first, inverse = np.unique(groups, return_index=True, return_inverse=True)
         unit_labels = None if labels is None else np.asarray(labels)[first]
+        if labels is not None and pd.Series(np.asarray(labels)).groupby(inverse).nunique(dropna=False).max() > 1:
+            warnings.warn(
+                "Stratification labels vary within windows of one trial (orig_trial). "
+                "Disabling stratification for this split.",
+                stacklevel=3,
+            )
+            unit_labels = None
         return np.arange(first.size), unit_labels, lambda positions: np.flatnonzero(np.isin(inverse, positions))
+
+    def _refuse_units_across(self, data, values: np.ndarray, boundary: str) -> None:
+        """Windows cut from one trial (``orig_trial``) must all fall on one side of a boundary the validator splits
+        on; otherwise those on the training side train on the trial being tested."""
+        groups = self._resolve_orig_trial_groups(data)
+        if groups is not None and pd.Series(np.asarray(values)).groupby(groups).nunique(dropna=False).max() > 1:
+            raise ValueError(
+                f"Windows of one trial (orig_trial) have different {boundary} values, so they would be split across "
+                "training and testing. Give each trial's windows one value."
+            )
 
     def _resolve_orig_trial_groups(self, data) -> np.ndarray | None:
         """Return per-trial grouping values based on orig_trial, if present."""
@@ -406,15 +425,18 @@ class CrossValidator(ABC):
                 f"orig_trial coordinate must have dimension ('trial',), but has {data.coords['orig_trial'].dims}."
             )
 
-        if len(np.unique(data.coords["trial"].values)) == len(np.unique(data.coords["orig_trial"].values)):
+        # orig_trial may restart in each subject and session (as check_split assumes): trials of different ones differ
+        scopes = [
+            data.coords[name].values
+            for name in ("subject", "session")
+            if name in data.coords and data.coords[name].dims == ("trial",)
+        ]
+        groups = np.asarray(
+            ["::".join(map(str, parts)) for parts in zip(*scopes, data.coords["orig_trial"].values)], dtype=str
+        )
+        if len(np.unique(data.coords["trial"].values)) == len(np.unique(groups)):
             return None
-
-        orig_values = data.coords["orig_trial"].values
-        if "session" in data.coords and data.coords["session"].dims == ("trial",):
-            session_values = data.coords["session"].values
-            return np.asarray([f"{session}::{orig}" for session, orig in zip(session_values, orig_values)], dtype=str)
-
-        return orig_values.astype(str)
+        return groups
 
     @staticmethod
     def _get_unique_groups_and_labels(

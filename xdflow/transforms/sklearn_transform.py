@@ -689,7 +689,8 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
         classes = self.encoder.classes_
         try:  # the training labels' dtype (XGBoost predicts 0/1 for bool labels), but only where values survive it
             cast = labels.astype(classes.dtype)
-            same = np.asarray(cast == labels, dtype=bool)
+            # both ways: comparing int64 with float64 rounds the integer, so 2**53 + 1 would equal 2.0**53
+            same = np.asarray((cast == labels) & (cast.astype(labels.dtype) == labels), dtype=bool)
         except (TypeError, ValueError):
             cast, same = labels, np.ones(labels.shape, dtype=bool)
         codes = np.where(same, pd.Index(classes).get_indexer(cast), -1)
@@ -743,7 +744,7 @@ def _positive_class_probability(probabilities: np.ndarray, classes: Any) -> np.n
 
 
 def _float_scale(*indexes: pd.Index) -> float:
-    """Largest float magnitude among the indexes (or their float levels)."""
+    """Largest finite float magnitude among the indexes (or their float levels)."""
     largest = 0.0
     for index in indexes:
         levels = (
@@ -752,20 +753,25 @@ def _float_scale(*indexes: pd.Index) -> float:
         for level in levels:
             values = np.asarray(level)
             if np.issubdtype(values.dtype, np.floating) and np.isfinite(values).any():
-                largest = max(largest, float(np.nanmax(np.abs(values))))
+                largest = max(largest, float(np.abs(values[np.isfinite(values)]).max()))
     return largest
 
 
 def _approximate_labels(index: pd.Index, scale: float) -> pd.Index:
     """Float labels (or float levels) rounded to 7 significant digits each (float32's precision); values below
-    1e-9 of the largest label across both indexes count as 0."""
+    1e-9 of the largest label across both indexes count as 0. Whole numbers stay exact: 12345678.0 and 12345679.0
+    are different labels, not one label rebuilt in float32."""
 
     def rounded(values: Any) -> np.ndarray:
         values = np.asarray(values)
         if not np.issubdtype(values.dtype, np.floating):
             return values
-        values = np.where(np.abs(values) < 1e-9 * scale, 0.0, values.astype(float))
-        return np.array([float(f"{value:.7g}") for value in values])
+        values = values.astype(float)
+        whole = values == np.round(values)
+        floored = np.where(np.abs(values) < 1e-9 * scale, 0.0, values)
+        return np.array(
+            [value if exact else float(f"{near:.7g}") for value, near, exact in zip(values, floored, whole)]
+        )
 
     if isinstance(index, pd.MultiIndex):
         return pd.MultiIndex.from_arrays([rounded(index.get_level_values(level)) for level in range(index.nlevels)])
