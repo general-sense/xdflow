@@ -534,3 +534,17 @@ def test_epochs_metadata_series_is_matched_by_position():
 
     container = _as_container(epochs, y=epochs.metadata["target"])
     np.testing.assert_array_equal(container.data.y.values, epochs.metadata["target"].to_numpy())
+
+
+def test_a_stacking_classifier_with_the_default_final_estimator_is_accepted():
+    from sklearn.ensemble import StackingClassifier
+    from sklearn.model_selection import StratifiedKFold
+
+    X = np.random.default_rng(0).normal(size=(60, 3))
+    y = np.arange(60) % 2
+    X[y == 1, 0] += 1
+    model = StackingClassifier([("lr", LogisticRegression())])
+    cv = StratifiedKFold(3)
+    np.testing.assert_allclose(
+        evaluate(model, X, y, cv=cv).fold_scores, cross_val_score(model, X, y, cv=cv, scoring="accuracy")
+    )

@@ -100,6 +100,7 @@ class LGBMPredictor(SKLearnPredictor):
         sel: dict | None = None,
         drop_sel: dict | None = None,
         sample_weight_coord: str | None = "sample_weight",
+        fit_on_labels: bool = False,
         **kwargs: Any,
     ):
         """Initialize LGBMPredictor with early stopping parameters."""
@@ -137,6 +138,7 @@ class LGBMPredictor(SKLearnPredictor):
             sel=sel,
             drop_sel=drop_sel,
             sample_weight_coord=sample_weight_coord,
+            fit_on_labels=fit_on_labels,
             **kwargs,
         )
 
@@ -172,8 +174,8 @@ class LGBMPredictor(SKLearnPredictor):
 
             # Extract target values
             if len(resolved_targets) == 1:
-                # Single target
-                y = data.coords[resolved_targets[0]].values
+                # Single target (as the estimator sees it: labels or codes, see fit_on_labels)
+                y = self._estimator_target(data.coords[resolved_targets[0]].values)
             else:
                 # Multi-target: stack all target coordinates
                 target_arrays = []

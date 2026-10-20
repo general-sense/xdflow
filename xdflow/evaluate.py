@@ -8,6 +8,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.base import is_classifier as is_sklearn_classifier
+from sklearn.base import is_regressor as is_sklearn_regressor
 from sklearn.metrics import get_scorer
 from sklearn.model_selection import GroupKFold, LeaveOneGroupOut, StratifiedGroupKFold
 from sklearn.utils.multiclass import check_classification_targets
@@ -336,7 +338,11 @@ def _as_pipeline(model: Any, y_name: str | None, data) -> Pipeline:
                 "earlier. Put scikit-learn preprocessing inside the final estimator's Pipeline."
             )
     if not isinstance(last, Transform):
-        if not (hasattr(last, "fit") and hasattr(last, "predict")):
+        # predict may appear only once fitted (StackingClassifier): the estimator type says it is a model
+        if not (
+            hasattr(last, "fit")
+            and (hasattr(last, "predict") or is_sklearn_classifier(last) or is_sklearn_regressor(last))
+        ):
             raise TypeError(f"Expected a scikit-learn estimator or xdflow predictor, got {type(last).__name__}.")
         # Fit as cross_val_score would: on the labels themselves, and without a sample_weight coordinate.
         last = SKLearnPredictor.from_estimator(

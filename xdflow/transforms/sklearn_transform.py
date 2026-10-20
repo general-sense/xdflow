@@ -652,12 +652,13 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
 
         if self.is_multilabel:
             if isinstance(raw_probabilities, list):
-                # Each target's probability of 1, found by its estimator's classes (a target trained on 0 alone has
-                # one column, for 0).
-                estimators = getattr(self.estimator, "estimators_", None)
+                # Each target's probability of 1, found by its classes (a target trained on 0 alone has one column,
+                # for 0). Multi-output estimators, native or wrapped, list one classes_ array per target.
+                classes = getattr(self.estimator, "classes_", None)
+                per_target = classes if isinstance(classes, list) and len(classes) == len(raw_probabilities) else None
                 probabilities = np.column_stack(
                     [
-                        _positive_class_probability(p, estimators[i].classes_ if estimators is not None else None)
+                        _positive_class_probability(p, per_target[i] if per_target is not None else None)
                         for i, p in enumerate(raw_probabilities)
                     ]
                 )

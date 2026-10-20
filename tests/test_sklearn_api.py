@@ -213,3 +213,23 @@ def test_multilabel_target_seen_with_one_class_has_its_true_probability():
     predictor = SKLearnPredictor(DummyClassifier, sample_dim="trial", target_coord=["a", "b"], is_multilabel=True)
     proba = make_pipeline(predictor).fit(DataContainer(data)).predict_proba(DataContainer(data)).data.values
     np.testing.assert_allclose(proba[0], [0.0, 0.5])
+
+
+@pytest.mark.parametrize("estimator", ["knn", "tree"])
+def test_native_multilabel_estimator_with_a_one_class_target(estimator):
+    import xarray as xr
+    from sklearn.neighbors import KNeighborsClassifier
+    from sklearn.tree import DecisionTreeClassifier
+
+    from xdflow import DataContainer
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    data = xr.DataArray(
+        np.random.default_rng(0).normal(size=(12, 2)),
+        dims=("trial", "feature"),
+        coords={"a": ("trial", np.zeros(12, int)), "b": ("trial", np.arange(12) % 2)},
+    )
+    model = KNeighborsClassifier(3) if estimator == "knn" else DecisionTreeClassifier(random_state=0)
+    predictor = SKLearnPredictor.from_estimator(model, sample_dim="trial", target_coord=["a", "b"], is_multilabel=True)
+    proba = make_pipeline(predictor).fit(DataContainer(data)).predict_proba(DataContainer(data)).data.values
+    np.testing.assert_allclose(proba[:, 0], 0.0)  # "a" was never positive in training
