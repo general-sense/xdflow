@@ -155,3 +155,23 @@ def test_new_data_with_dims_in_another_order_is_put_back_in_fit_order(X, y):
     expected = fitted.predict(DataContainer(unlabeled)).data.values
     transposed = fitted.predict(DataContainer(unlabeled.transpose("trial", "time", "channel"))).data.values
     np.testing.assert_array_equal(transposed, expected)
+
+
+def test_new_data_with_an_extra_singleton_dim_is_aligned(X, y):
+    import xarray as xr
+    from sklearn.pipeline import make_pipeline as sk_make_pipeline
+    from sklearn.preprocessing import FunctionTransformer
+
+    from xdflow import DataContainer
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    flatten = FunctionTransformer(lambda a: a.reshape(len(a), -1))
+    predictor = SKLearnPredictor.from_estimator(
+        sk_make_pipeline(flatten, LogisticRegression()), sample_dim="trial", target_coord="label"
+    )
+    data = xr.DataArray(X, dims=DIMS, coords={**COORDS, "label": ("trial", y)})
+    fitted = make_pipeline(predictor).fit(DataContainer(data))
+    unlabeled = data.drop_vars("label")
+    expected = fitted.predict_proba(DataContainer(unlabeled)).data.values
+    odd = unlabeled.expand_dims("band").transpose("trial", "time", "band", "channel")
+    np.testing.assert_allclose(fitted.predict_proba(DataContainer(odd)).data.values, expected)

@@ -434,7 +434,8 @@ class CrossValidator(ABC):
                 return unique_groups, None
             group_labels.append(unique_labels[0])
 
-        return unique_groups, np.array(group_labels, dtype=object)
+        # In the labels' own dtype: an object array of integers is not a class target for scikit-learn's splitters.
+        return unique_groups, np.array(group_labels, dtype=labels.dtype)
 
     # ------------------------------
     # Scoring Function Resolution

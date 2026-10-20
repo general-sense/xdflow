@@ -72,8 +72,15 @@ def get_freq_band_indices(frequencies, low, high):
 
 
 def check_sampling_rate(data: Any, fs: float, name: str) -> None:
-    """Raise when ``fs`` contradicts the sampling rate recorded with the data (``attrs["sfreq"]``, set by
-    ``from_mne_epochs``): filtering at the wrong rate shifts every frequency without any other sign."""
-    sfreq = data.attrs.get("sfreq")
-    if sfreq is not None and not np.isclose(float(sfreq), float(fs), rtol=1e-3):
-        raise ValueError(f"{name} has fs={fs} Hz, but the data was sampled at {float(sfreq):g} Hz (attrs['sfreq']).")
+    """Raise when ``fs`` contradicts the data's sampling rate: the spacing of a time coordinate in seconds (as made
+    by ``from_mne_epochs``), else ``attrs["sfreq"]``, which a step that decimates may leave stale. Filtering at the
+    wrong rate shifts every frequency without any other sign."""
+    time = data.coords.get("time")
+    if time is not None and time.attrs.get("units") == "s" and time.size > 1:
+        actual, source = 1.0 / float(np.median(np.diff(np.asarray(time.values, dtype=float)))), "time coordinate"
+    elif data.attrs.get("sfreq") is not None:
+        actual, source = float(data.attrs["sfreq"]), "attrs['sfreq']"
+    else:
+        return
+    if not np.isclose(actual, float(fs), rtol=1e-3):
+        raise ValueError(f"{name} has fs={fs} Hz, but the data is sampled at {actual:g} Hz (from its {source}).")

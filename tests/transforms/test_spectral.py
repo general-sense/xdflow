@@ -126,3 +126,21 @@ def test_bandpass_refuses_a_sampling_rate_that_contradicts_the_data():
     with pytest.raises(ValueError, match="250"):
         BandpassFilterTransform(8, 30, fs=160).transform(DataContainer(data))
     BandpassFilterTransform(8, 30, fs=250).transform(DataContainer(data))
+
+
+def test_bandpass_trusts_the_time_coordinate_over_a_stale_sampling_rate():
+    import xarray as xr
+
+    from xdflow import DataContainer
+    from xdflow.transforms.spectral import BandpassFilterTransform
+
+    data = xr.DataArray(
+        np.random.default_rng(0).normal(size=(4, 2, 800)),
+        dims=("trial", "channel", "time"),
+        coords={"time": ("time", np.arange(800) / 160.0, {"units": "s"})},
+        attrs={"sfreq": 160.0},
+    )
+    decimated = data.isel(time=slice(None, None, 2))  # now 80 Hz, attrs still say 160
+    BandpassFilterTransform(8, 30, fs=80).transform(DataContainer(decimated))
+    with pytest.raises(ValueError, match="80"):
+        BandpassFilterTransform(8, 30, fs=160).transform(DataContainer(decimated))

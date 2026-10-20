@@ -7,9 +7,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, clone
-from sklearn.base import is_classifier as is_sklearn_classifier
-from sklearn.dummy import DummyClassifier
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.metrics import get_scorer
 from sklearn.model_selection import GroupKFold, LeaveOneGroupOut, StratifiedGroupKFold
 from sklearn.utils.multiclass import check_classification_targets
@@ -154,7 +152,8 @@ def evaluate(
         dims: Dim names for NumPy input, starting with ``"trial"`` (e.g. ``("trial", "channel", "time")``).
         random_state: Seed for fold shuffling.
         cache: Reuse per-fold fits cached on disk from earlier identical runs (fits that depend on functions
-            from your own code are recomputed unless ``XDFLOW_CACHE_USER_CODE=1``).
+            from your own code are recomputed unless ``XDFLOW_CACHE_USER_CODE=1``). A reused fit of an
+            estimator without ``random_state`` repeats one random draw, so leave it off for seed studies.
         verbose: Print progress.
 
     Returns:
@@ -339,32 +338,15 @@ def _as_pipeline(model: Any, y_name: str | None, data) -> Pipeline:
     if not isinstance(last, Transform):
         if not (hasattr(last, "fit") and hasattr(last, "predict")):
             raise TypeError(f"Expected a scikit-learn estimator or xdflow predictor, got {type(last).__name__}.")
-        if is_sklearn_classifier(last) and data.coords[y_name].ndim == 1:
-            last = _in_class_codes(last, data.coords[y_name].values)
-        # No sample_weight coordinate: a scikit-learn model is fit as cross_val_score would, whatever the metadata.
-        last = SKLearnPredictor.from_estimator(last, sample_dim="trial", target_coord=y_name, sample_weight_coord=None)
+        # Fit as cross_val_score would: on the labels themselves, and without a sample_weight coordinate.
+        last = SKLearnPredictor.from_estimator(
+            last, sample_dim="trial", target_coord=y_name, sample_weight_coord=None, fit_on_labels=True
+        )
     elif isinstance(last, Predictor) and getattr(last, "target_coord", y_name) != y_name:
         raise ValueError(f"The final predictor predicts '{last.target_coord}' but y is '{y_name}'.")
     if not head and isinstance(last, Pipeline):
         return last
     return make_pipeline(*head, last, name="model")
-
-
-def _in_class_codes(estimator: Any, labels: np.ndarray) -> Any:
-    """The estimator with its class-naming parameters (``class_weight`` dicts, ``DummyClassifier``'s ``constant``)
-    given as the codes 0, 1, 2... of the sorted classes, which xdflow fits classifiers on, so that it behaves as
-    scikit-learn fitting it on the labels themselves."""
-    codes = {label: code for code, label in enumerate(np.unique(labels))}
-    params = estimator.get_params(deep=True)
-    updates: dict[str, Any] = {}
-    for key, value in params.items():
-        owner_key, _, name = key.rpartition("__")
-        owner = params.get(owner_key, estimator) if owner_key else estimator
-        if name == "class_weight" and isinstance(value, dict):
-            updates[key] = {codes.get(label, label): weight for label, weight in value.items()}
-        elif name == "constant" and isinstance(owner, DummyClassifier) and np.ndim(value) == 0 and value in codes:
-            updates[key] = codes[value]
-    return clone(estimator).set_params(**updates) if updates else estimator
 
 
 def _as_validator(
@@ -398,7 +380,12 @@ def _as_validator(
     if groups_name is None:
         stratified = "stratified by class, " if is_classifier and isinstance(target, str) else ""
         validator = KFoldValidator(n_splits=n_splits, shuffle=True, random_state=random_state, **options)
-        return validator, f"{n_splits}-fold, {stratified}trials shuffled"
+        windows = (
+            ", windows of one orig_trial kept together"
+            if validator._resolve_orig_trial_groups(data) is not None
+            else ""
+        )
+        return validator, f"{n_splits}-fold, {stratified}trials shuffled{windows}"
 
     n_groups = len(pd.unique(np.asarray(data.coords[groups_name].values)))
     if n_groups < 2:

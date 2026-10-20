@@ -453,3 +453,41 @@ def test_a_pooled_only_score_ignores_undefined_fold_scores():
         warnings.simplefilter("ignore")
         result = evaluate(DummyRegressor(), np.arange(6.0).reshape(3, 2), np.arange(3.0), cv=validator)
     assert result.score == pytest.approx(result.validator.oof_score_)
+
+
+def test_scikit_learn_models_see_the_labels_themselves():
+    """Anything inside the model that names a class (pos_label in a nested scorer, class_weight in a
+    meta-estimator) means what it means in scikit-learn, and fails where scikit-learn fails."""
+    from sklearn.model_selection import GridSearchCV, StratifiedKFold
+    from sklearn.multiclass import OneVsRestClassifier
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(120, 3))
+    y = np.array([1, 2])[(X[:, 0] + rng.normal(size=120) > 0.3).astype(int)]
+    cv = StratifiedKFold(4)
+    for model in (
+        GridSearchCV(LogisticRegression(), {"C": [0.01, 1.0]}, scoring="recall", cv=3),
+        OneVsRestClassifier(LogisticRegression(class_weight={0: 1.0, 1: 10.0})),
+        LogisticRegression(class_weight={1: 1.0, 2: 1.0, 0: 50.0}),
+    ):
+        np.testing.assert_allclose(
+            evaluate(model, X, y, cv=cv).fold_scores,
+            cross_val_score(model, X, y, cv=cv, scoring="accuracy"),
+            err_msg=str(model),
+        )
+    labels = y.astype(str)
+    with pytest.raises(Exception, match="class_weight|classes"):
+        cross_val_score(LogisticRegression(class_weight={1: 20.0}), X, labels, cv=cv, error_score="raise")
+    with pytest.raises(Exception, match="class_weight|classes"):
+        evaluate(LogisticRegression(class_weight={1: 20.0}), X, labels, cv=cv)
+
+
+def test_windows_of_one_trial_stay_together_with_integer_labels():
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(100, 4))
+    y = np.repeat(rng.integers(1, 3, 25), 4)  # 4 windows per trial, integer labels
+    windows = pd.DataFrame({"orig_trial": np.repeat(np.arange(25), 4)})
+    result = evaluate(LogisticRegression(), X, y, metadata=windows)
+    assert "orig_trial kept together" in result.cv_description
+    folds = result.predictions.groupby("orig_trial")["fold"].nunique()
+    assert (folds == 1).all()

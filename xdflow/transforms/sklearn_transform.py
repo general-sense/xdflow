@@ -168,8 +168,11 @@ class SKLearnTransform(Transform, SampleWeightMixin):
         would otherwise be silently mis-assigned. Labels missing from the new data raise.
         """
         fit_dims = getattr(self, "_fit_dims", None)  # absent in models pickled before dim order was recorded
-        if fit_dims is not None and set(data.dims) == set(fit_dims) and data.dims != fit_dims:
-            data = data.transpose(*fit_dims)  # N-D estimators read axes by position, like features
+        if fit_dims is not None:
+            extra = [dim for dim in data.dims if dim not in fit_dims and data.sizes[dim] == 1]
+            data = data.squeeze(extra, drop=True) if extra else data  # a size-1 dim absent at fit holds nothing
+            if set(data.dims) == set(fit_dims) and data.dims != fit_dims:
+                data = data.transpose(*fit_dims)  # N-D estimators read axes by position, like features
         for dim, fitted in getattr(self, "_fit_labels", {}).items():
             if dim not in data.indexes or data.indexes[dim].equals(fitted):
                 continue
@@ -193,7 +196,7 @@ class SKLearnTransform(Transform, SampleWeightMixin):
             # Resolve target coordinates (handles patterns, lists, and single coords)
             resolved_targets = self._resolve_target_coords(data)
             self._resolved_target_coords = resolved_targets
-            y = extract_target_array(resolved_targets, data, validate=False)
+            y = self._estimator_target(extract_target_array(resolved_targets, data, validate=False))
 
             self._wrap_for_resolved_targets(resolved_targets)
 
@@ -220,6 +223,10 @@ class SKLearnTransform(Transform, SampleWeightMixin):
             else:
                 self.estimator.fit(X, **fit_kwargs)
         return self
+
+    def _estimator_target(self, y: Any) -> Any:
+        """The target as the estimator receives it."""
+        return y
 
     def _clone_estimator_cls(self) -> Any:
         """The estimator class ``clone()`` rebuilds from (the unwrapped class after automatic multi-output wrapping)."""
@@ -469,6 +476,7 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
         sel: dict[str, Any] | None = None,
         drop_sel: dict[str, Any] | None = None,
         sample_weight_coord: str | None = "sample_weight",
+        fit_on_labels: bool = False,
         **kwargs: Any,
     ):
         """Initialize a predictor wrapper.
@@ -489,6 +497,9 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
             sel: Label selection applied before fitting or transforming.
             drop_sel: Label selection dropped before fitting or transforming.
             sample_weight_coord: Coordinate containing optional sample weights.
+            fit_on_labels: For single-label classifiers, fit the estimator on the class labels themselves instead
+                of their codes 0, 1, 2..., so parameters that name classes (``class_weight``, ``pos_label`` in a
+                nested scorer) mean what they mean in scikit-learn.
             **kwargs: Estimator constructor arguments plus parent-class options.
         """
         parent_param_names = collect_super_init_param_names(type(self), SKLearnTransform)
@@ -573,6 +584,7 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
             sample_weight_coord=sample_weight_coord,
             **kwargs,
         )
+        self.fit_on_labels = fit_on_labels
 
     # _transform implemented by Predictor
 
@@ -610,7 +622,8 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
         if not hasattr(self.estimator, "predict"):
             raise AttributeError(f"Estimator '{self.estimator.__class__.__name__}' has no method 'predict'.")
         X, _ = self._prepare_data(self._align_to_fit(data))
-        return self.estimator.predict(X)
+        predictions = self.estimator.predict(X)
+        return self.encoder.transform(predictions) if self._fits_on_labels() else predictions
 
     def _predict_proba(self, data: xr.DataArray, **kwargs) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -634,7 +647,15 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
                 probabilities = raw_probabilities
             return probabilities, np.arange(probabilities.shape[1])
 
-        return raw_probabilities, self.estimator.classes_
+        classes = self.estimator.classes_
+        return raw_probabilities, (self.encoder.transform(classes) if self._fits_on_labels() else classes)
+
+    def _fits_on_labels(self) -> bool:
+        return bool(getattr(self, "fit_on_labels", False)) and self.is_classifier and not self.is_multilabel
+
+    def _estimator_target(self, y: Any) -> Any:
+        # Codes back to the labels the estimator should see (Predictor.fit encoded them).
+        return self.encoder.inverse_transform(np.ravel(y)) if self._fits_on_labels() else y
 
     def get_expected_output_dims(self, input_dims: tuple[str, ...]) -> tuple[str, ...]:
         """
