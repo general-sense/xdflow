@@ -635,3 +635,17 @@ def test_parameters_whose_contents_cannot_be_hashed_give_a_key_that_never_repeat
 
     frame = pd.DataFrame({"callback": [lambda x: x]})
     assert hash_dict({"v": _get_object_metadata(frame)}) != hash_dict({"v": _get_object_metadata(frame)})
+
+
+def test_pandas_extension_arrays_are_hashed_by_content():
+    import pandas as pd
+
+    from xdflow.transforms.basic_transforms import IdentityTransform
+    from xdflow.utils.cache_utils import _get_object_params
+
+    for first, second in (
+        (pd.array(["C3", "C4"], dtype="string"), pd.array(["C3", "Cz"], dtype="string")),
+        (pd.array([1, 2], dtype="Int64"), pd.array([1, 3], dtype="Int64")),
+    ):
+        keys = [hash_dict(_get_object_params(IdentityTransform(sel={"channel": value}))) for value in (first, second)]
+        assert keys[0] != keys[1], type(first)

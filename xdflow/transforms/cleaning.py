@@ -12,7 +12,7 @@ from xdflow.transforms.normalization import _stat_dims, _warn_if_pooling_trials
 
 def _signal_channel_mask(channel_values: np.ndarray, excluded_channels: Sequence[str] | None) -> np.ndarray:
     """Return a boolean mask selecting signal channels (i.e., not excluded)."""
-    if not excluded_channels:
+    if excluded_channels is None or len(excluded_channels) == 0:  # also for a pandas Index, which has no truth value
         return np.ones(len(channel_values), dtype=bool)
     return ~np.isin(channel_values, np.asarray(excluded_channels, dtype=object))
 

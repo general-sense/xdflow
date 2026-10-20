@@ -177,6 +177,9 @@ def evaluate(
         group=None if isinstance(groups, str) else groups,
     )
     data = container.data
+    reserved = sorted({"fold", "y_true", "y_pred"} & set(_trial_coords(data)))
+    if reserved:  # they would be overwritten in result.predictions and by()
+        raise ValueError(f"Trial coordinates {reserved} are names evaluate uses for its results; rename them.")
     y_name = y if isinstance(y, str) else (y_coord if y is not None else None)
     groups_name = groups if isinstance(groups, str) else ("group" if groups is not None else None)
 
@@ -193,6 +196,15 @@ def evaluate(
 
     # scikit-learn scorer objects (make_scorer, get_scorer) score like their names; other callables are metrics.
     is_scorer = callable(scoring) and type(scoring).__module__.startswith("sklearn.metrics")
+    if (
+        not is_scorer
+        and getattr(scoring, "__name__", None) in _SCORE_METRICS
+        and str(getattr(scoring, "__module__", "")).startswith("sklearn.metrics")
+    ):  # a (y_true, y_pred) callable receives predicted labels, which these metrics would silently accept
+        raise ValueError(
+            f"scoring={scoring.__name__} needs probabilities or decision scores; evaluate scores predicted labels. "
+            "Pass its name (e.g. 'roc_auc') to see why, or use a validator with scoring_needs_proba=True."
+        )
     metric: str | None = scoring if isinstance(scoring, str) else getattr(scoring, "__name__", None)
     if is_scorer:
         metric = getattr(getattr(scoring, "_score_func", None), "__name__", "custom")
@@ -267,6 +279,9 @@ class _PredictedLabels(ClassifierMixin, _Predictions):
 
 class _PredictedValues(RegressorMixin, _Predictions):
     pass
+
+
+_SCORE_METRICS = {"roc_auc_score", "log_loss", "average_precision_score", "brier_score_loss", "top_k_accuracy_score"}
 
 
 def _sklearn_metric(scoring: Any, is_classifier: bool, classes: Any = None, name: str | None = None) -> Any:

@@ -561,3 +561,16 @@ def test_many_classes_are_cross_validated():
     y = np.repeat(np.arange(150), 6)
     X = rng.normal(size=(900, 2)) + y[:, None]
     assert len(evaluate(LogisticRegression(max_iter=50), X, y, cv=3).fold_scores) == 3
+
+
+def test_metric_functions_that_need_scores_are_refused(model, X, y):
+    from sklearn.metrics import roc_auc_score
+
+    with pytest.raises(ValueError, match="roc_auc_score"):
+        evaluate(model, X, y, cv=3, scoring=roc_auc_score)
+
+
+@pytest.mark.parametrize("name", ["fold", "y_pred", "y_true"])
+def test_metadata_columns_named_like_result_columns_are_refused(model, X, y, name):
+    with pytest.raises(ValueError, match=name):
+        evaluate(model, X, y, cv=3, metadata=pd.DataFrame({name: np.arange(120) % 5}))

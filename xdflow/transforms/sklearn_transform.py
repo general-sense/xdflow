@@ -187,6 +187,12 @@ class SKLearnTransform(Transform, SampleWeightMixin):
             if data.indexes[dim].equals(fitted):
                 continue
             positions = data.indexes[dim].get_indexer(fitted)
+            if (
+                positions < 0
+            ).any():  # float labels rebuilt elsewhere (np.linspace, float32) can differ in the last bits
+                approximate, approximate_fitted = _approximate_labels(data.indexes[dim]), _approximate_labels(fitted)
+                if approximate.is_unique and approximate_fitted.is_unique:
+                    positions = approximate.get_indexer(approximate_fitted)
             if (positions < 0).any():
                 missing = list(fitted[positions < 0][:5])
                 raise ValueError(
@@ -727,3 +733,18 @@ def _positive_class_probability(probabilities: np.ndarray, classes: Any) -> np.n
             return np.full(len(probabilities), float(seen))
         raise ValueError(f"A multilabel target was trained on class {seen!r} alone, so its positive class is unknown.")
     raise ValueError(f"Multilabel targets must be binary; one has classes {classes.tolist()}.")
+
+
+def _approximate_labels(index: pd.Index) -> pd.Index:
+    """Float labels (or float levels) rounded to 7 digits of their largest magnitude, float32's precision."""
+
+    def rounded(values: Any) -> np.ndarray:
+        values = np.asarray(values)
+        if not np.issubdtype(values.dtype, np.floating) or not np.isfinite(values).any():
+            return values
+        scale = float(np.nanmax(np.abs(values))) or 1.0
+        return np.round(values.astype(float), 6 - int(np.floor(np.log10(scale))))
+
+    if isinstance(index, pd.MultiIndex):
+        return pd.MultiIndex.from_arrays([rounded(index.get_level_values(level)) for level in range(index.nlevels)])
+    return pd.Index(rounded(index))

@@ -39,6 +39,12 @@ All notable changes to this project will be documented in this file.
     the time coordinate.
   - Validators refuse a `scoring` that is not a name, a callable or None (it silently fell back to the default
     metric).
+  - `LeaveGroupOutValidator` refuses `test_group_ids` that match no group (they were silently cross-validated).
+  - `evaluate` refuses a DataFrame `X` with non-numeric columns, scikit-learn metric functions that need scores
+    (`roc_auc_score`, `log_loss`), and trial coordinates named `fold`, `y_true` or `y_pred`.
+- `GroupedKFoldValidator` and `SampledDomainKFoldValidator` keep windows cut from one trial (`orig_trial`) on one
+  side of every split and of the holdout, as `KFoldValidator` already did.
+- The Tuner works on copies of the pipelines and validator it is given, so seeding and tuning no longer change them.
 - `SKLearnPredictor(fit_on_labels=True)` fits the estimator on the class labels themselves; `evaluate` uses it for
   scikit-learn models.
 - Validators no longer cache fitted fold pipelines on disk by default (`use_stateful_fit_cache=False`): a

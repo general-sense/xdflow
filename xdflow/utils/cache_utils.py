@@ -624,7 +624,15 @@ def _get_object_metadata(obj: Any) -> Any:
     return {"__class__": obj.__class__.__name__, "repr": str(obj)}
 
 
-_PANDAS_VALUES = (pd.Index, pd.Categorical, pd.Timestamp, pd.Timedelta, pd.Period, pd.Interval, pd.DateOffset)
+_PANDAS_VALUES = (
+    pd.Index,
+    pd.api.extensions.ExtensionArray,  # string, Int64, boolean... arrays (pandas 3's default strings too)
+    pd.Timestamp,
+    pd.Timedelta,
+    pd.Period,
+    pd.Interval,
+    pd.DateOffset,
+)
 # Parameter values keyed by content, although they have a __dict__ (which holds no values for these).
 _BY_CONTENT = (enum.Enum, np.random.Generator, np.random.BitGenerator, np.random.RandomState, *_PANDAS_VALUES)
 

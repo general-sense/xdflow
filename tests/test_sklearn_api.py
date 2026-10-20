@@ -330,3 +330,21 @@ def test_a_multilabel_target_seen_with_one_class_reads_its_classes_not_its_colum
     )
     proba = make_pipeline(predictor).fit(DataContainer(data)).predict_proba(DataContainer(data)).data.values
     np.testing.assert_allclose(proba[:, 0], 1.0)
+
+
+def test_new_data_with_float_labels_a_few_ulps_off_is_accepted(X, y):
+    import xarray as xr
+
+    from xdflow import DataContainer
+
+    data = xr.DataArray(X, dims=DIMS, coords={**COORDS, "label": ("trial", y)})
+    flat = make_pipeline(  # no crop, whose window boundary would itself move
+        FlattenTransform(dims=("channel", "time")),
+        SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label"),
+    )
+    fitted = flat.fit(DataContainer(data))
+    unlabeled = data.drop_vars("label")
+    nudged = unlabeled.assign_coords(time=unlabeled.time.values + 1e-15)
+    np.testing.assert_array_equal(
+        fitted.predict(DataContainer(nudged)).data.values, fitted.predict(DataContainer(unlabeled)).data.values
+    )
