@@ -46,16 +46,18 @@ are either per-sample arrays or names of trial coordinates:
   score is for new groups. With no more groups than folds, each group is held out in turn; otherwise groups are
   split into `cv` folds, stratified by class. A splitter passed as `cv` is used as is, as in scikit-learn
   (`groups` reach group splitters such as `GroupKFold`); `evaluate` warns if it puts a group on both sides.
-- **Without `groups`**, folds are stratified by class and trials are shuffled. If the data has a subject,
+- **Without `groups`**, folds are stratified by class and trials are shuffled; windows cut from one trial (an
+  `orig_trial` coordinate) stay on the same side. If the data has a subject,
   session or similar coordinate, `evaluate` warns that the score is for new trials from known subjects, and
   names the `groups=` that would score new subjects instead.
 - **`cv`** also accepts any scikit-learn splitter (`GroupKFold(5)`, `TimeSeriesSplit(4)`...), explicit
   `(train, test)` index pairs, or an xdflow validator for holdouts and custom policies.
 
 With the same split, `evaluate` gives the same fold scores as scikit-learn's `cross_val_score`. An int `cv`
-shuffles trials (seeded by `random_state`), unlike scikit-learn's. Classifiers are fit on class labels encoded
-as 0, 1, 2... in sorted order; `evaluate` translates a `class_weight` dict and `DummyClassifier(constant=...)` of
-the scikit-learn model you pass, but in an xdflow `SKLearnPredictor` such parameters use those codes.
+shuffles trials (seeded by `random_state`), unlike scikit-learn's. The scikit-learn model you pass is fit on your
+labels themselves, so a `class_weight` dict or a nested scorer's `pos_label` means what it means in scikit-learn;
+in an xdflow `SKLearnPredictor`, such parameters name the codes 0, 1, 2... of the sorted classes unless you pass
+`fit_on_labels=True`.
 
 ### Metrics
 
