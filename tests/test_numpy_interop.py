@@ -47,3 +47,12 @@ def test_as_container_refuses_to_overwrite_existing_coordinates():
         _as_container(data, label=[1, 1, 1, 1])
     with pytest.raises(ValueError, match="only applies to NumPy"):
         _as_container(data, dims=("trial", "x"))
+
+
+def test_metadata_columns_that_collide_as_text_are_refused():
+    import pandas as pd
+
+    from xdflow.interop import from_numpy
+
+    with pytest.raises(ValueError, match="same name"):
+        from_numpy(np.zeros((4, 2)), metadata=pd.DataFrame([[0, 1]] * 4, columns=[1, "1"]))

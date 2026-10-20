@@ -190,3 +190,14 @@ def test_findings_use_the_right_article(X, y):
     data = from_numpy(X, ("trial", "feature"), label=y, animal=np.repeat(np.arange(6), 10))
     finding = check_split(data, StratifiedKFold(3, shuffle=True, random_state=0), y="label").findings[0]
     assert "from an animal seen in training" in finding
+
+
+def test_missing_ids_are_reported_rather_than_certified_apart():
+    data = from_numpy(np.arange(8.0).reshape(4, 2), ("trial", "feature"), subject=np.full(4, np.nan))
+    report = check_split(data, [([0, 1], [2, 3])])
+    assert not report.ok
+    assert "no 'subject'" in report.findings[0]
+
+
+def test_signed_zeros_are_duplicates():
+    assert not check_split(np.array([[0.0, 1.0], [-0.0, 1.0]]), [([0], [1])]).ok

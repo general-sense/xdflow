@@ -49,10 +49,10 @@ def from_mne_epochs(epochs: Any, label_coord: str = "label", **trial_coords: Any
     }
     metadata = getattr(epochs, "metadata", None)
     if metadata is not None:
-        for column in metadata.columns:
-            if column in coords:
-                raise ValueError(f"epochs.metadata column '{column}' clashes with the '{column}' coordinate.")
-            coords[str(column)] = ("trial", metadata[column].to_numpy())
+        for name, column_values in _metadata_columns(metadata).items():
+            if name in coords:
+                raise ValueError(f"epochs.metadata column '{name}' clashes with the '{name}' coordinate.")
+            coords[name] = ("trial", column_values)
     _add_trial_coords(coords, trial_coords, n_trials)
 
     data = xr.DataArray(
@@ -109,11 +109,18 @@ def from_numpy(
     if metadata is not None:
         if len(metadata) != n_trials:
             raise ValueError(f"metadata has {len(metadata)} rows for {n_trials} samples.")
-        _add_trial_coords(
-            all_coords, {str(column): metadata[column].to_numpy() for column in metadata.columns}, n_trials
-        )
+        _add_trial_coords(all_coords, _metadata_columns(metadata), n_trials)
     _add_trial_coords(all_coords, trial_coords, n_trials)
     return DataContainer(xr.DataArray(values, dims=dims, coords=all_coords))
+
+
+def _metadata_columns(metadata: Any) -> dict[str, np.ndarray]:
+    """Metadata columns by name, as text (coordinate names); names that become the same text are refused."""
+    names = [str(column) for column in metadata.columns]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(f"metadata has several columns with the same name as text: {repeated}.")
+    return {name: metadata[column].to_numpy() for name, column in zip(names, metadata.columns)}
 
 
 def _add_trial_coords(coords: dict[str, Any], trial_coords: dict[str, Any], n_trials: int) -> None:
@@ -150,7 +157,7 @@ def _as_container(
         if len(metadata) != data.sizes["trial"]:
             raise ValueError(f"metadata has {len(metadata)} rows for {data.sizes['trial']} trials.")
         _refuse_reordered_rows(metadata.index, data, own_trial_labels, "metadata")
-        new_coords.update({str(column): metadata[column].to_numpy() for column in metadata.columns})
+        new_coords.update(_metadata_columns(metadata))
         given_twice = sorted(set(new_coords) & set(trial_coords))
         if given_twice:
             raise ValueError(f"{given_twice} are given both as metadata columns and as arguments; pass them once.")

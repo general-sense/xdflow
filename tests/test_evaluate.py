@@ -440,3 +440,16 @@ def test_class_naming_parameters_mean_what_they_mean_in_scikit_learn(labels):
         DummyClassifier(strategy="constant", constant=labels[1]),
     ):
         np.testing.assert_allclose(evaluate(model, X, y, cv=cv).fold_scores, cross_val_score(model, X, y, cv=cv))
+
+
+def test_a_pooled_only_score_ignores_undefined_fold_scores():
+    from sklearn.dummy import DummyRegressor
+    from sklearn.model_selection import KFold
+
+    from xdflow import SplitterValidator
+
+    validator = SplitterValidator(KFold(3), scoring="r2", pooling_score_weight=1.0, verbose=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = evaluate(DummyRegressor(), np.arange(6.0).reshape(3, 2), np.arange(3.0), cv=validator)
+    assert result.score == pytest.approx(result.validator.oof_score_)

@@ -28,6 +28,7 @@ from xdflow.core.data_container import DataContainer
 from xdflow.transforms import Predictor
 from xdflow.utils.cache_utils import (
     _get_object_metadata,
+    _installed_packages_fingerprint,
     cache_user_code,
     get_module_hashes_for_object,
     references_user_code,
@@ -755,6 +756,7 @@ class CrossValidator(ABC):
                         fold_pipeline.get_params(deep=True) if hasattr(fold_pipeline, "get_params") else None
                     ),
                     "module_hashes": get_module_hashes_for_object(fold_pipeline),
+                    "installed_packages": _installed_packages_fingerprint(),
                     "train_signature": train_container,
                 }
             )
@@ -1455,6 +1457,8 @@ class CrossValidator(ABC):
         if self.pooling_score_weight == 0:
             return mean_score  # the pooled score is not needed, and may be undefined (binary F1 of 3 classes)
         pooled_score = self.oof_score_
+        if self.pooling_score_weight == 1:
+            return pooled_score  # fold scores do not count, and may be undefined (R² of one trial)
 
         final_score = (1 - self.pooling_score_weight) * mean_score + self.pooling_score_weight * pooled_score
         return final_score

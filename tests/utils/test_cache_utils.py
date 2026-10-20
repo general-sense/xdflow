@@ -493,3 +493,33 @@ def test_user_code_found_in_array_subclasses_and_wrapped_functions_and_not_in_ge
 
     cached(1), cached(1)
     assert calls == [1, 1]  # a user function decorated directly is user code too
+
+
+def test_cache_keys_see_rng_state_coordinate_attrs_and_installed_packages(tmp_path, monkeypatch):
+    import sys
+
+    from xdflow.utils import cache_utils
+    from xdflow.utils.cache_utils import _get_object_metadata
+
+    def key(value):
+        return hash_dict({"value": _get_object_metadata(value)})
+
+    assert key(np.random.default_rng(1)) != key(np.random.default_rng(2))
+    assert key(np.random.RandomState(1)) != key(np.random.RandomState(2))
+
+    data = xr.DataArray(np.ones((2, 2)), dims=("trial", "feature"), coords={"feature": [0, 1]}, name="voltage")
+    other_units = data.copy()
+    other_units["feature"].attrs["units"] = "uV"
+    assert key(DataContainer(data)) != key(DataContainer(other_units))
+    assert key(DataContainer(data)) != key(DataContainer(data.rename("spikes")))
+
+    site = tmp_path / "site"
+    (site / "labtools-1.0.dist-info").mkdir(parents=True)
+    (site / "labtools-1.0.dist-info" / "RECORD").write_text("labtools/__init__.py,sha256=a,1\n")
+    monkeypatch.syspath_prepend(str(site))
+    cache_utils._installed_packages_fingerprint.cache_clear()
+    before = cache_utils._installed_packages_fingerprint()
+    (site / "labtools-1.0.dist-info" / "RECORD").write_text("labtools/__init__.py,sha256=bb,2\n")  # reinstalled
+    cache_utils._installed_packages_fingerprint.cache_clear()
+    assert cache_utils._installed_packages_fingerprint() != before
+    assert any(str(site) in path for path in sys.path)

@@ -13,6 +13,7 @@ import json
 import os
 import pickle
 import shutil
+import sys
 import sysconfig
 import threading
 import time
@@ -237,6 +238,7 @@ def cache_result(
                     key_dict["config"] = _get_object_params(instance)
                     key_dict["module_hash"] = _get_module_hash_from_obj(instance)
 
+            key_dict["installed_packages"] = _installed_packages_fingerprint()
             cache_key = hash_dict(key_dict)
             cache_path = _get_cache_dir(prefix) / f"{cache_key}.pkl"
 
@@ -290,14 +292,41 @@ def _get_datacontainer_metadata(dc: DataContainer) -> dict[str, Any]:
         "shape": tuple(dc.shape),
         "dims": tuple(dc.dims),
         "data": _get_ndarray_metadata(np.asarray(dc.data.values)),
+        "name": str(dc.data.name),
         "coord_metadata": {
-            str(name): {"dims": tuple(coord.dims), **_get_ndarray_metadata(np.asarray(coord.values))}
+            str(name): {
+                "dims": tuple(coord.dims),
+                **_get_ndarray_metadata(np.asarray(coord.values)),
+                "attrs": _get_object_metadata(dict(coord.attrs)),  # e.g. units, which steps may read
+            }
             for name, coord in dc.data.coords.items()
         },
         # Transforms may read settings from attrs (e.g. a sampling rate). `data_history` only records the
         # steps already applied, which the step configuration in the key covers.
         "attrs": _get_object_metadata({str(k): v for k, v in dc.data.attrs.items() if k != "data_history"}),
     }
+
+
+def _bit_generator(rng: Any) -> Any:
+    return rng.bit_generator if isinstance(rng, np.random.Generator) else rng
+
+
+@functools.lru_cache(maxsize=1)
+def _installed_packages_fingerprint() -> str:
+    """Installed distributions on sys.path, by metadata directory and the size and time of their RECORD, so that
+    installing, upgrading or reinstalling a library (a dependency or your own package) changes every cache key.
+    Read once per process: restart after installing."""
+    entries = []
+    for entry in sys.path:
+        if not os.path.isdir(entry):
+            continue
+        with os.scandir(entry) as items:
+            for item in items:
+                if item.name.endswith((".dist-info", ".egg-info")):
+                    record = os.path.join(item.path, "RECORD")
+                    stat = os.stat(record if os.path.exists(record) else item.path)
+                    entries.append(f"{entry}/{item.name}:{stat.st_size}:{stat.st_mtime_ns}")
+    return hashlib.md5("\n".join(sorted(entries)).encode()).hexdigest()
 
 
 def _get_dataframe_metadata(df: pd.DataFrame) -> dict[str, Any]:
@@ -550,6 +579,10 @@ def _get_object_metadata(obj: Any) -> Any:
         return _get_sequence_metadata(obj)
     if isinstance(obj, (set, frozenset)):
         return _get_set_metadata(obj)
+    if isinstance(obj, (np.random.Generator, np.random.BitGenerator)):  # their text is the same for every seed
+        return {"rng": type(obj).__name__, "state": _get_object_metadata(_bit_generator(obj).state)}
+    if isinstance(obj, np.random.RandomState):
+        return {"rng": "RandomState", "state": _get_object_metadata(list(obj.get_state()))}
     if isinstance(obj, enum.Enum):  # members keep their identity in private attributes
         return {"enum": f"{type(obj).__module__}.{type(obj).__qualname__}.{obj.name}"}
     if callable(obj):
@@ -598,7 +631,7 @@ def _get_object_params(obj: Any) -> Any:
             continue
         if _is_plain_callable(value):
             params[key] = _get_callable_metadata(value)
-        elif isinstance(value, enum.Enum):
+        elif isinstance(value, (enum.Enum, np.random.Generator, np.random.BitGenerator, np.random.RandomState)):
             params[key] = _get_object_metadata(value)
         elif hasattr(value, "__dict__"):
             # Recursively get parameters of nested objects

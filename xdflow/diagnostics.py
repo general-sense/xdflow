@@ -227,6 +227,14 @@ def audit_splits(
                 folds_shared += 1
                 examples.extend(sorted(map(str, shared))[: 3 - len(examples)])
         label = f"{name} (within {', '.join(parents)})" if scoped else name
+        # Missing ids (NaN, None) never compare equal, so trials without one cannot be shown to be apart.
+        audited_trials = np.unique(np.concatenate([np.concatenate(pair) for pair in split_trials]))
+        n_missing = int(pd.isna(np.asarray(data.coords[name].values)[trial_position.get_indexer(audited_trials)]).sum())
+        if n_missing:
+            findings.append(
+                f"{n_missing} trials have no '{name}' value, so whether they share one with the other side of the "
+                "split is unknown."
+            )
         rows.append(
             {
                 "check": label,
@@ -244,7 +252,7 @@ def audit_splits(
         sample_bytes = (
             (repr(row.tolist()).encode() for row in samples)
             if samples.dtype == object
-            else (np.ascontiguousarray(row).tobytes() for row in samples)
+            else (np.ascontiguousarray(row + 0.0 if row.dtype.kind == "f" else row).tobytes() for row in samples)
         )
         digests = np.array([hashlib.blake2b(row, digest_size=16).digest() for row in sample_bytes])
         folds_dup, n_dup = 0, 0
