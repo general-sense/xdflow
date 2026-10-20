@@ -149,13 +149,16 @@ def _as_container(
     if metadata is not None:
         if len(metadata) != data.sizes["trial"]:
             raise ValueError(f"metadata has {len(metadata)} rows for {data.sizes['trial']} trials.")
-        # Rows are matched to trials by position, as in scikit-learn (a default RangeIndex never names trials).
+        # Rows are matched to trials by position, as in scikit-learn.
         # Metadata indexed by the data's own trial labels in another order could mean rows by label or rows by
         # position: refuse rather than guess.
         trials = data.indexes.get("trial") if own_trial_labels else None
         index = metadata.index
-        # Labels must match one to one (intervals match by containment, so they never name trials).
-        exact = not isinstance(index, (pd.RangeIndex, pd.IntervalIndex)) and index.is_unique
+        # Labels must match one to one: a default index (0, 1, 2...) is positions, and intervals match points by
+        # containment, so neither names trials.
+        default = isinstance(index, pd.RangeIndex) and index.equals(pd.RangeIndex(len(index)))
+        containment = isinstance(index, pd.IntervalIndex) and not isinstance(trials, pd.IntervalIndex)
+        exact = not default and not containment and index.is_unique
         rows = index.get_indexer(trials) if trials is not None and exact and len(index) == len(trials) else None
         one_to_one = rows is not None and bool((rows >= 0).all()) and np.unique(rows).size == rows.size
         if one_to_one and not (rows == np.arange(rows.size)).all():

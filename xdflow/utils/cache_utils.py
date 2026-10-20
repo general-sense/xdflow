@@ -220,7 +220,8 @@ def cache_result(
 
             # Verbosity does not change results, so it must not change the key
             key_kwargs = {k: v for k, v in kwargs.items() if k != "verbose"}
-            if not cache_user_code() and references_user_code(*args, *key_kwargs.values()):
+            user_code = _is_user_code(func) or references_user_code(*args, *key_kwargs.values())
+            if user_code and not cache_user_code():
                 return func(*args, **kwargs)  # depends on user code, which a key cannot fully cover
             if key_gen_func and instance:
                 key_dict = key_gen_func(func, *args, **key_kwargs)
@@ -398,10 +399,12 @@ class _UserCodeFinder(pickle.Pickler):
     """Pickles to nowhere, stopping at the first object from user code."""
 
     def reducer_override(self, obj: Any) -> Any:
-        if isinstance(obj, np.ndarray) and obj.dtype != object:
+        if type(obj) is np.ndarray and not obj.dtype.hasobject:
             return int, ()  # numbers carry no code: skip serializing them
         code = obj if inspect.isclass(obj) or inspect.isroutine(obj) else type(obj)
-        if _is_user_code(code):
+        # Wrappers (functools.wraps, numba's vectorize) may hide the wrapped function inside their own reduction.
+        wrapped = [getattr(obj, name, None) for name in ("__wrapped__", "py_func")]
+        if any(candidate is not None and _is_user_code(candidate) for candidate in [code, *wrapped]):
             raise _UserCodeFoundError
         return NotImplemented
 
@@ -469,13 +472,15 @@ def _is_user_code(obj: Any) -> bool:
     code comes from, since functools.wraps copies another function's module."""
     code = getattr(obj, "__code__", None)
     source = getattr(code, "co_filename", None)
-    if source is not None and source.startswith("<"):  # exec, stdin, notebook frontends; "<frozen os>" is stdlib
-        return not source.startswith("<frozen")
-    if source is None or not os.path.isabs(source):  # no code, or compiled code naming its .pyx relatively
+    if source is None or not os.path.isabs(source):
+        # No code, or code without a file ("<decorator-gen-15>", Cython's "<stringsource>" or relative .pyx names,
+        # notebook cells, exec): judge it by the module that defines it.
         module = obj if inspect.ismodule(obj) else inspect.getmodule(obj)
+        if module is None:  # exec'd code outside any module is user code; frozen code is the standard library
+            return source is not None and not source.startswith("<frozen")
         source = getattr(module, "__file__", None)
         if source is None:  # a notebook's __main__, or a built-in module
-            return getattr(module, "__name__", None) == "__main__"
+            return module.__name__ == "__main__"
     path = Path(source).resolve()
     return not any(path.is_relative_to(directory) for directory in _LIBRARY_DIRS)
 

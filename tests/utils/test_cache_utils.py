@@ -444,3 +444,52 @@ def test_user_code_is_found_through_custom_reductions_and_object_arrays():
     start = time.perf_counter()
     assert not references_user_code(big)
     assert time.perf_counter() - start < 0.05  # numeric arrays are not serialized to be checked
+
+
+class _CallableArray(np.ndarray):
+    def __call__(self, x):
+        return x * 2
+
+
+def test_user_code_found_in_array_subclasses_and_wrapped_functions_and_not_in_generated_library_code():
+    import functools
+
+    import mne
+    import pandas as pd
+
+    from xdflow.utils.cache_utils import cache_result, references_user_code
+
+    assert references_user_code(np.zeros(3).view(_CallableArray))
+    records = np.empty(2, dtype=[("f", object)])
+    records["f"] = _Absolute()
+    assert references_user_code(records)  # structured arrays with object fields are walked too
+
+    def user(x):
+        return x
+
+    @functools.wraps(user)
+    def library_style(*args):  # stands in for a library wrapper (numba's DUFunc) exposing the user function
+        return user(*args)
+
+    class Wrapper:  # a library-defined callable class would hide the function inside its own reduction
+        __wrapped__ = staticmethod(user)
+
+        def __reduce__(self):
+            return int, ()
+
+    Wrapper.__module__ = "numpy"
+    assert references_user_code(Wrapper())
+    assert not references_user_code(mne.filter.filter_data, functools.partial(mne.filter.filter_data, sfreq=100.0))
+    assert not references_user_code(
+        pd.DataFrame({"c": pd.Categorical(["a", "b"])}), pd.date_range("2026", periods=2, tz="UTC")
+    )
+
+    calls = []
+
+    @cache_result(prefix="standalone")
+    def cached(x):
+        calls.append(x)
+        return x
+
+    cached(1), cached(1)
+    assert calls == [1, 1]  # a user function decorated directly is user code too

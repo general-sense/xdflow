@@ -384,3 +384,11 @@ def test_metadata_rows_by_position_when_labels_only_partly_match():
     data = xr.DataArray(np.arange(3.0)[:, None], dims=("trial", "f"), coords={"trial": [0.5, 1.5, 2.5]})
     rows = pd.DataFrame({"subject": [1, 2, 3]}, index=pd.IntervalIndex.from_tuples([(1, 2), (2, 3), (0, 1)]))
     np.testing.assert_array_equal(_as_container(data, metadata=rows).data.subject.values, [1, 2, 3])
+
+
+def test_a_non_default_range_index_names_trials():
+    from xdflow.interop import _as_container
+
+    data = xr.DataArray(np.arange(3.0)[:, None], dims=("trial", "f"), coords={"trial": [10, 20, 30]})
+    with pytest.raises(ValueError, match="order"):
+        _as_container(data, metadata=pd.DataFrame({"subject": [3, 2, 1]}, index=pd.RangeIndex(30, 0, -10)))
