@@ -27,6 +27,7 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
+import xarray as xr
 
 from xdflow.core.data_container import DataContainer
 
@@ -238,7 +239,7 @@ def cache_result(
                     key_dict["config"] = _get_object_params(instance)
                     key_dict["module_hash"] = _get_module_hash_from_obj(instance)
 
-            key_dict["installed_packages"] = _installed_packages_fingerprint()
+            key_dict["installed_packages"] = _installed_code_fingerprint()
             cache_key = hash_dict(key_dict)
             cache_path = _get_cache_dir(prefix) / f"{cache_key}.pkl"
 
@@ -288,22 +289,27 @@ def _get_datacontainer_metadata(dc: DataContainer) -> dict[str, Any]:
     Hashing everything (not a sample) is what keeps a cache from returning results computed on
     different data or labels.
     """
+    return _get_dataarray_metadata(dc.data)
+
+
+def _get_dataarray_metadata(data: xr.DataArray) -> dict[str, Any]:
+    """Build a deterministic signature for a DataArray from its full values, coordinates, attrs and name."""
     return {
-        "shape": tuple(dc.shape),
-        "dims": tuple(dc.dims),
-        "data": _get_ndarray_metadata(np.asarray(dc.data.values)),
-        "name": str(dc.data.name),
+        "shape": tuple(data.shape),
+        "dims": tuple(data.dims),
+        "data": _get_ndarray_metadata(np.asarray(data.values)),
+        "name": str(data.name),
         "coord_metadata": {
             str(name): {
                 "dims": tuple(coord.dims),
                 **_get_ndarray_metadata(np.asarray(coord.values)),
                 "attrs": _get_object_metadata(dict(coord.attrs)),  # e.g. units, which steps may read
             }
-            for name, coord in dc.data.coords.items()
+            for name, coord in data.coords.items()
         },
         # Transforms may read settings from attrs (e.g. a sampling rate). `data_history` only records the
         # steps already applied, which the step configuration in the key covers.
-        "attrs": _get_object_metadata({str(k): v for k, v in dc.data.attrs.items() if k != "data_history"}),
+        "attrs": _get_object_metadata({str(k): v for k, v in data.attrs.items() if k != "data_history"}),
     }
 
 
@@ -311,12 +317,19 @@ def _bit_generator(rng: Any) -> Any:
     return rng.bit_generator if isinstance(rng, np.random.Generator) else rng
 
 
+_XDFLOW_DIR = Path(__file__).resolve().parents[1]
+
+
 @functools.lru_cache(maxsize=1)
-def _installed_packages_fingerprint() -> str:
-    """Installed distributions on sys.path, by metadata directory and the size and time of their RECORD, so that
-    installing, upgrading or reinstalling a library (a dependency or your own package) changes every cache key.
-    Read once per process: restart after installing."""
-    entries = []
+def _installed_code_fingerprint() -> str:
+    """Installed distributions on sys.path, by metadata directory and the size and time of their RECORD, and the
+    source of xdflow itself, so that installing, upgrading or reinstalling a library (a dependency or your own
+    package), or editing xdflow in a checkout, changes every cache key. Read once per process: restart after
+    installing or editing."""
+    entries = [
+        f"xdflow/{path.relative_to(_XDFLOW_DIR)}:{hashlib.md5(path.read_bytes()).hexdigest()}"
+        for path in sorted(_XDFLOW_DIR.rglob("*.py"))
+    ]
     for entry in sys.path:
         if not os.path.isdir(entry):
             continue
@@ -565,8 +578,17 @@ def _get_object_metadata(obj: Any) -> Any:
     """
     if isinstance(obj, (int, float, str, bool, type(None))):
         return obj
+    if isinstance(obj, np.ma.MaskedArray):
+        return {
+            "data": _get_ndarray_metadata(np.ma.getdata(obj)),
+            "mask": _get_ndarray_metadata(np.ma.getmaskarray(obj)),
+        }
     if isinstance(obj, np.ndarray):
         return _get_ndarray_metadata(obj)
+    if isinstance(obj, xr.DataArray):
+        return _get_dataarray_metadata(obj)
+    if isinstance(obj, _PANDAS_VALUES):  # their values live in private attributes
+        return {"pandas": type(obj).__name__, "hash": joblib.hash(obj)}
     if isinstance(obj, DataContainer):
         return _get_datacontainer_metadata(obj)
     if isinstance(obj, pd.DataFrame):
@@ -590,6 +612,11 @@ def _get_object_metadata(obj: Any) -> Any:
     if hasattr(obj, "__dict__"):
         return _get_object_with_dict_metadata(obj)
     return {"__class__": obj.__class__.__name__, "repr": str(obj)}
+
+
+_PANDAS_VALUES = (pd.Index, pd.Categorical, pd.Timestamp, pd.Timedelta, pd.Period, pd.Interval, pd.DateOffset)
+# Parameter values keyed by content, although they have a __dict__ (which holds no values for these).
+_BY_CONTENT = (enum.Enum, np.random.Generator, np.random.BitGenerator, np.random.RandomState, *_PANDAS_VALUES)
 
 
 def _get_object_params(obj: Any) -> Any:
@@ -631,7 +658,7 @@ def _get_object_params(obj: Any) -> Any:
             continue
         if _is_plain_callable(value):
             params[key] = _get_callable_metadata(value)
-        elif isinstance(value, (enum.Enum, np.random.Generator, np.random.BitGenerator, np.random.RandomState)):
+        elif isinstance(value, _BY_CONTENT):
             params[key] = _get_object_metadata(value)
         elif hasattr(value, "__dict__"):
             # Recursively get parameters of nested objects

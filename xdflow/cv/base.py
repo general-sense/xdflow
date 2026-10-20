@@ -28,7 +28,7 @@ from xdflow.core.data_container import DataContainer
 from xdflow.transforms import Predictor
 from xdflow.utils.cache_utils import (
     _get_object_metadata,
-    _installed_packages_fingerprint,
+    _installed_code_fingerprint,
     cache_user_code,
     get_module_hashes_for_object,
     references_user_code,
@@ -756,7 +756,7 @@ class CrossValidator(ABC):
                         fold_pipeline.get_params(deep=True) if hasattr(fold_pipeline, "get_params") else None
                     ),
                     "module_hashes": get_module_hashes_for_object(fold_pipeline),
-                    "installed_packages": _installed_packages_fingerprint(),
+                    "installed_packages": _installed_code_fingerprint(),
                     "train_signature": train_container,
                 }
             )

@@ -517,9 +517,50 @@ def test_cache_keys_see_rng_state_coordinate_attrs_and_installed_packages(tmp_pa
     (site / "labtools-1.0.dist-info").mkdir(parents=True)
     (site / "labtools-1.0.dist-info" / "RECORD").write_text("labtools/__init__.py,sha256=a,1\n")
     monkeypatch.syspath_prepend(str(site))
-    cache_utils._installed_packages_fingerprint.cache_clear()
-    before = cache_utils._installed_packages_fingerprint()
+    cache_utils._installed_code_fingerprint.cache_clear()
+    before = cache_utils._installed_code_fingerprint()
     (site / "labtools-1.0.dist-info" / "RECORD").write_text("labtools/__init__.py,sha256=bb,2\n")  # reinstalled
-    cache_utils._installed_packages_fingerprint.cache_clear()
-    assert cache_utils._installed_packages_fingerprint() != before
+    cache_utils._installed_code_fingerprint.cache_clear()
+    assert cache_utils._installed_code_fingerprint() != before
     assert any(str(site) in path for path in sys.path)
+
+
+def test_cache_keys_see_the_contents_of_pandas_and_xarray_parameters():
+    import pandas as pd
+
+    from xdflow.transforms.basic_transforms import IdentityTransform
+    from xdflow.utils.cache_utils import _get_object_metadata, _get_object_params
+
+    def key(value):
+        return hash_dict({"value": _get_object_metadata(value)})
+
+    pairs = [
+        (pd.Index(["c1", "c2"]), pd.Index(["c1", "c3"])),
+        (pd.Categorical(["a", "b"]), pd.Categorical(["a", "a"])),
+        (pd.Timestamp("2026-01-01"), pd.Timestamp("2026-01-02")),
+        (pd.Timedelta("1s"), pd.Timedelta("2s")),
+        (xr.DataArray(np.arange(300)), xr.DataArray(np.r_[np.arange(150), 999, np.arange(151, 300)])),
+        (np.ma.masked_array([1, 2], mask=[0, 1]), np.ma.masked_array([1, 2], mask=[1, 0])),
+    ]
+    for first, second in pairs:
+        assert key(first) != key(second), type(first)
+    selected = IdentityTransform(sel={"channel": pd.Index(["c1", "c2"])})
+    other = IdentityTransform(sel={"channel": pd.Index(["c1", "c3"])})
+    assert hash_dict(_get_object_params(selected)) != hash_dict(_get_object_params(other))
+
+
+def test_cache_keys_follow_xdflows_own_sources(monkeypatch, tmp_path):
+    from xdflow.utils import cache_utils
+
+    cache_utils._installed_code_fingerprint.cache_clear()
+    before = cache_utils._installed_code_fingerprint()
+    fake = tmp_path / "xdflow"
+    (fake / "utils").mkdir(parents=True)
+    (fake / "utils" / "helper.py").write_text("x = 1\n")
+    monkeypatch.setattr(cache_utils, "_XDFLOW_DIR", fake)
+    cache_utils._installed_code_fingerprint.cache_clear()
+    first = cache_utils._installed_code_fingerprint()
+    (fake / "utils" / "helper.py").write_text("x = 2\n")  # edited in a checkout
+    cache_utils._installed_code_fingerprint.cache_clear()
+    assert cache_utils._installed_code_fingerprint() not in (first, before)
+    cache_utils._installed_code_fingerprint.cache_clear()
