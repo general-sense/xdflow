@@ -36,7 +36,9 @@ All notable changes to this project will be documented in this file.
 - Results that depend on functions from your own code (`@step` functions, lambdas, `FunctionTransform`) are no
   longer reused from the disk cache, which could return stale results after a change in code the cache key did
   not cover (e.g. a helper in another module). Set `XDFLOW_CACHE_USER_CODE=1` to cache them; their keys now
-  include the helpers, constants and modules they read. Cache keys also hash dict parameters by content.
+  include the helpers, constants and modules they read. Cache keys also hash dict, pandas, xarray and random
+  generator parameters by content, and include the installed packages and xdflow's own source, so upgrading or
+  reinstalling a package invalidates cached results.
 
 ## [0.3.0] - 2026-10-10
 

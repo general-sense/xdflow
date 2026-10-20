@@ -130,7 +130,9 @@ changes. **`xdflow` finds the optimal point for you, automatically, at every lev
    trials that only change later steps reuse it instead of recomputing features. Fitted fold models are
    cached under their exact training set. Results that depend on your own functions (`@xdflow.step`,
    lambdas) are recomputed rather than reused from disk unless you set `XDFLOW_CACHE_USER_CODE=1`, since
-   xdflow cannot see every code a function depends on.
+   xdflow cannot see every code a function depends on. Keys also cover the installed packages, but not files
+   or environment variables a step reads, or the global random state: for a seed study, set `random_state`
+   or turn the fit cache off (`use_stateful_fit_cache=False`).
 3. **Splits by name.** Folds and holdouts are defined by coordinates such as `subject` or `session`, so
    keeping correlated samples apart is one argument rather than a `groups` array kept in sync by hand.
    You choose what to keep apart; xdflow keeps it in sync, everywhere.
