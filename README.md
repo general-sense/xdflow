@@ -48,7 +48,8 @@ group
 ...
 ```
 
-(Activity recognition from smartphone sensors, 30 people; [walkthrough](docs/tutorials/har-activity.md).)
+(Activity recognition from smartphone sensors, 30 people, with the features computed in the
+[evaluate notebook](examples/notebooks/evaluate.ipynb); a longer [walkthrough](docs/tutorials/har-activity.md).)
 `result.predictions` holds every out-of-fold prediction with its trial metadata, `result.by(...)` breaks the
 score down by any coordinate (`"group"` for groups given as an array, or any `metadata=` column), and
 `result.fit_final()` refits on all the data for new predictions.

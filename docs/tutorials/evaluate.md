@@ -54,8 +54,8 @@ are either per-sample arrays or names of trial coordinates:
 
 With the same split, `evaluate` gives the same fold scores as scikit-learn's `cross_val_score`. An int `cv`
 shuffles trials (seeded by `random_state`), unlike scikit-learn's. Classifiers are fit on class labels encoded
-as 0, 1, 2... in sorted order, so estimator parameters that name a class (a `class_weight` dict,
-`DummyClassifier(constant=...)`) must use those codes; `class_weight="balanced"` needs no change.
+as 0, 1, 2... in sorted order; `evaluate` translates a `class_weight` dict and `DummyClassifier(constant=...)` of
+the scikit-learn model you pass, but in an xdflow `SKLearnPredictor` such parameters use those codes.
 
 ### Metrics
 
@@ -179,10 +179,15 @@ such as MOABB:
 ```python
 from sklearn.model_selection import GroupKFold, cross_val_score
 
+# e.g. the EEG pipeline above, evaluated on epochs
+result = xdflow.evaluate(
+    [BandpassFilterTransform(8, 30, fs=160), CropTimeTransform(0.5, 4.0), existing_model], epochs, groups="subject"
+)
 estimator = xdflow.to_sklearn(
     result.pipeline,
     dims=("trial", "channel", "time"),
-    coords={"channel": channel_names, "time": times},  # for steps that select by label
+    coords={"channel": epochs.ch_names, "time": epochs.times},  # for steps that select by label
 )
+X, y, subject_ids = epochs.get_data(), epochs.events[:, 2], epochs.metadata["subject"].to_numpy()
 cross_val_score(estimator, X, y, groups=subject_ids, cv=GroupKFold(5))
 ```
