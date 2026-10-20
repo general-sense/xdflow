@@ -46,8 +46,8 @@ are either per-sample arrays or names of trial coordinates:
   score is for new groups. With no more groups than folds, each group is held out in turn; otherwise groups are
   split into `cv` folds, stratified by class. A splitter passed as `cv` is used as is, as in scikit-learn
   (`groups` reach group splitters such as `GroupKFold`); `evaluate` warns if it puts a group on both sides.
-- **Without `groups`**, folds are stratified by class and trials are shuffled; windows cut from one trial (an
-  `orig_trial` coordinate) stay on the same side. If the data has a subject,
+- **Without `groups`** (and an int `cv`), folds are stratified by class and trials are shuffled; windows cut from
+  one trial (an `orig_trial` coordinate) stay on the same side. If the data has a subject,
   session or similar coordinate, `evaluate` warns that the score is for new trials from known subjects, and
   names the `groups=` that would score new subjects instead.
 - **`cv`** also accepts any scikit-learn splitter (`GroupKFold(5)`, `TimeSeriesSplit(4)`...), explicit
