@@ -46,7 +46,7 @@ class KFoldValidator(CrossValidator):
         stratify_coord: str | None = None,
         exclude_intertrial_from_scoring: bool = False,
         exclude_offsets_from_scoring: bool = False,
-        use_stateful_fit_cache: bool = True,
+        use_stateful_fit_cache: bool = False,
         release_fold_memory: bool = False,
         scoring_needs_proba: bool = False,
         verbose: bool = True,
@@ -65,7 +65,7 @@ class KFoldValidator(CrossValidator):
             scoring: Scoring metric to use. If None, auto-selects based on task type.
             stratify_coord: Optional coordinate name to use for stratified splits (train/val/holdout).
             exclude_intertrial_from_scoring: Whether to drop intertrial segments when evaluating folds/holdout.
-            use_stateful_fit_cache: Whether to cache stateful transforms during CV.
+            use_stateful_fit_cache: Whether to reuse fitted fold pipelines cached on disk by earlier identical runs.
             verbose: Whether to print verbose output specific to cross-validation.
         """
         super().__init__(
@@ -254,7 +254,7 @@ class GroupedKFoldValidator(CrossValidator):
         stratify_by_group: bool = True,
         exclude_intertrial_from_scoring: bool = False,
         exclude_offsets_from_scoring: bool = False,
-        use_stateful_fit_cache: bool = True,
+        use_stateful_fit_cache: bool = False,
         release_fold_memory: bool = False,
         scoring_needs_proba: bool = False,
         verbose: bool = True,
@@ -280,7 +280,7 @@ class GroupedKFoldValidator(CrossValidator):
                               If True (default), stratifies by group+target combination.
                               If False, only stratifies by target (or stratify_coord if set).
             exclude_intertrial_from_scoring: Whether to drop intertrial segments during evaluation.
-            use_stateful_fit_cache: Whether to cache stateful transforms during CV.
+            use_stateful_fit_cache: Whether to reuse fitted fold pipelines cached on disk by earlier identical runs.
             verbose: Whether to print verbose output specific to cross-validation.
         """
         super().__init__(

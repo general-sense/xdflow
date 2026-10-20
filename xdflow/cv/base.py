@@ -208,7 +208,7 @@ class CrossValidator(ABC):
     def __init__(
         self,
         pooling_score_weight: float = 0.0,
-        use_stateful_fit_cache: bool = True,
+        use_stateful_fit_cache: bool = False,
         release_fold_memory: bool = False,
         scoring: str | Callable | None = None,
         scoring_needs_proba: bool = False,
@@ -224,7 +224,9 @@ class CrossValidator(ABC):
                 score (0.0) and the pooled OOF score (1.0). Defaults to 0.0.
                 Must be between 0.0 and 1.0.
                 Higher values give more weight to folds with more trials.
-            use_stateful_fit_cache: Whether to cache stateful transforms during CV.
+            use_stateful_fit_cache: Whether to reuse fitted fold pipelines cached on disk by earlier identical runs.
+                Off by default: a reused fit of an estimator without ``random_state`` repeats one random draw, so
+                for example a seed study would show no variance. Steps that learn nothing run once per run either way.
             release_fold_memory: Whether to aggressively release per-fold objects and
                 clear PyTorch CUDA caches after each fold.
             scoring: Metric name or callable. If None, classification defaults

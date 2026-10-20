@@ -33,7 +33,7 @@ class SplitterValidator(CrossValidator):
         scoring_needs_proba: bool = False,
         exclude_intertrial_from_scoring: bool = False,
         exclude_offsets_from_scoring: bool = False,
-        use_stateful_fit_cache: bool = True,
+        use_stateful_fit_cache: bool = False,
         release_fold_memory: bool = False,
         verbose: bool = True,
     ):
@@ -50,7 +50,7 @@ class SplitterValidator(CrossValidator):
             scoring_needs_proba: Whether a custom scorer expects probabilities.
             exclude_intertrial_from_scoring: Drop intertrial segments when scoring.
             exclude_offsets_from_scoring: Drop trials with a non-zero time offset when scoring.
-            use_stateful_fit_cache: Whether to cache per-fold fits on disk.
+            use_stateful_fit_cache: Whether to reuse fitted fold pipelines cached on disk by earlier identical runs.
             release_fold_memory: Whether to release per-fold objects after each fold.
             verbose: Whether to print progress.
         """

@@ -30,7 +30,7 @@ class LeaveGroupOutValidator(CrossValidator):
         random_state: int = 0,
         exclude_intertrial_from_scoring: bool = False,
         exclude_offsets_from_scoring: bool = False,
-        use_stateful_fit_cache: bool = True,
+        use_stateful_fit_cache: bool = False,
         release_fold_memory: bool = False,
         scoring_needs_proba: bool = False,
         verbose: bool = True,
@@ -50,7 +50,7 @@ class LeaveGroupOutValidator(CrossValidator):
             n_splits: Total number of splits to perform. If None, all groups are used.
             random_state: Random state for reproducibility. Used for shuffling groups if n_splits is set.
             exclude_intertrial_from_scoring: Whether to drop intertrial segments during evaluation.
-            use_stateful_fit_cache: Whether to cache stateful transforms during CV.
+            use_stateful_fit_cache: Whether to reuse fitted fold pipelines cached on disk by earlier identical runs.
             verbose: Whether to print verbose output specific to cross-validation.
         """
         super().__init__(
@@ -210,7 +210,7 @@ class LeaveSessionOutValidator(LeaveGroupOutValidator):
         random_state: int = 0,
         exclude_intertrial_from_scoring: bool = False,
         exclude_offsets_from_scoring: bool = False,
-        use_stateful_fit_cache: bool = True,
+        use_stateful_fit_cache: bool = False,
         release_fold_memory: bool = False,
         scoring_needs_proba: bool = False,
         verbose: bool = True,
@@ -229,7 +229,7 @@ class LeaveSessionOutValidator(LeaveGroupOutValidator):
             n_splits: Total number of splits to perform. If None, all sessions are used.
             random_state: Random state for reproducibility. Used for shuffling sessions if n_splits is set.
             exclude_intertrial_from_scoring: Whether to drop intertrial segments during evaluation.
-            use_stateful_fit_cache: Whether to cache stateful transforms during CV.
+            use_stateful_fit_cache: Whether to reuse fitted fold pipelines cached on disk by earlier identical runs.
             verbose: Whether to print verbose output specific to cross-validation.
         """
         # Delegate to LeaveGroupOutValidator with group_coord="session"
@@ -274,7 +274,7 @@ class LeaveAnimalOutValidator(LeaveGroupOutValidator):
         random_state: int = 0,
         exclude_intertrial_from_scoring: bool = False,
         exclude_offsets_from_scoring: bool = False,
-        use_stateful_fit_cache: bool = True,
+        use_stateful_fit_cache: bool = False,
         release_fold_memory: bool = False,
         scoring_needs_proba: bool = False,
         verbose: bool = True,
@@ -293,7 +293,7 @@ class LeaveAnimalOutValidator(LeaveGroupOutValidator):
             n_splits: Total number of splits to perform. If None, all animals are used.
             random_state: Random state for reproducibility. Used for shuffling sessions if n_splits is set.
             exclude_intertrial_from_scoring: Whether to drop intertrial segments during evaluation.
-            use_stateful_fit_cache: Whether to cache stateful transforms during CV.
+            use_stateful_fit_cache: Whether to reuse fitted fold pipelines cached on disk by earlier identical runs.
             verbose: Whether to print verbose output specific to cross-validation.
         """
         # Delegate to LeaveGroupOutValidator with group_coord="animal"

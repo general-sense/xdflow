@@ -564,3 +564,42 @@ def test_cache_keys_follow_xdflows_own_sources(monkeypatch, tmp_path):
     cache_utils._installed_code_fingerprint.cache_clear()
     assert cache_utils._installed_code_fingerprint() not in (first, before)
     cache_utils._installed_code_fingerprint.cache_clear()
+
+
+def test_validators_do_not_cache_fitted_folds_unless_asked():
+    """Reused fits make unseeded estimators look deterministic (a seed study would show no variance)."""
+    import os
+    from pathlib import Path
+
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.model_selection import KFold
+
+    from xdflow import GroupedKFoldValidator, KFoldValidator, LeaveGroupOutValidator, SplitterValidator
+    from xdflow.composite import Pipeline
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    for validator in (
+        KFoldValidator(n_splits=3),
+        GroupedKFoldValidator(group_coord="subject", n_splits=2),
+        LeaveGroupOutValidator(group_coord="subject"),
+        SplitterValidator(KFold(3)),
+    ):
+        assert validator.use_stateful_fit_cache is False, type(validator).__name__
+
+    rng = np.random.default_rng(0)
+    data = DataContainer(
+        xr.DataArray(
+            rng.normal(size=(30, 4)),
+            dims=("trial", "feature"),
+            coords={"trial": np.arange(30), "label": ("trial", np.arange(30) % 2)},
+        )
+    )
+    forest = SKLearnPredictor(RandomForestClassifier, sample_dim="trial", target_coord="label", n_estimators=5)
+    validator = KFoldValidator(n_splits=3, verbose=False)
+    validator.set_pipeline(Pipeline("p", [("rf", forest)]))
+    scores = []
+    for seed in range(3):
+        np.random.seed(seed)
+        scores.append(validator.cross_validate(data))
+    assert len(set(scores)) > 1  # each seed gives its own forests
+    assert not list(Path(os.environ["XDFLOW_CACHE_DIR"]).rglob("*.pkl"))

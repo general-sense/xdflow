@@ -43,7 +43,7 @@ class SampledDomainKFoldValidator(CrossValidator):
         stratify_coord: str | None = None,
         exclude_intertrial_from_scoring: bool = False,
         exclude_offsets_from_scoring: bool = False,
-        use_stateful_fit_cache: bool = True,
+        use_stateful_fit_cache: bool = False,
         release_fold_memory: bool = False,
         verbose: bool = True,
     ):
