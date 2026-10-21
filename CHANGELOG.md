@@ -42,6 +42,9 @@ All notable changes to this project will be documented in this file.
     were silently cross-validated).
   - `evaluate` refuses a DataFrame `X` with non-numeric columns, scikit-learn metric functions that need scores
     (`roc_auc_score`, `log_loss`), and trial coordinates named `fold`, `y_true` or `y_pred`.
+  - Multilabel `predict_proba` refuses a target with more than two classes, or one trained on a single class other
+    than 0 or 1 (its positive class is unknown). A target trained only on 0 (or only on 1) gives probability 0
+    (or 1); it gave the probability of the class it saw.
 - `GroupedKFoldValidator` and `SampledDomainKFoldValidator` keep windows cut from one trial (`orig_trial`) on one
   side of every split and of the holdout, as `KFoldValidator` already did. Trial numbers are taken per subject and
   session; stratification is turned off, with a warning, when labels vary among a trial's windows; and windows of
