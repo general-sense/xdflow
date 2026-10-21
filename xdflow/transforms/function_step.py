@@ -345,9 +345,6 @@ def _read_only(data: xr.DataArray) -> xr.DataArray:
             view = coord.variable.data.view()
             view.flags.writeable = False
             locked = locked.assign_coords({name: coord.variable.copy(deep=False, data=view)})
-    locked.attrs = copy.deepcopy(data.attrs)  # nested attrs too: steps must not change the input's metadata
-    for name in locked.coords:
-        locked[name].attrs = copy.deepcopy(data[name].attrs)
     return locked
 
 

@@ -12,8 +12,8 @@ All notable changes to this project will be documented in this file.
   trial metadata, which steps ran once and which were refit per fold, and a split audit; warns when shuffled
   folds share subjects or sessions. Metric names follow scikit-learn.
 - `xdflow.check_split(X, cv, ...)`: audits any split (scikit-learn splitters, index pairs, or an xdflow
-  validator after `cross_validate`, including its holdout) for subjects, sessions, runs and source trials shared
-  between training and test sets, and for test samples with an exact copy in the training set.
+  validator after `cross_validate`) for subjects, sessions, runs and source trials shared between training and
+  test sets, and for test samples with an exact copy in the training set.
 - `@xdflow.step`: a function of an `xr.DataArray` becomes a pipeline step whose parameters clone, cache and
   tune like a built-in transform's. Inputs are read-only, each call checks that trials are processed
   independently, and `@step(fit=...)` adds state learned on training folds.
@@ -38,8 +38,6 @@ All notable changes to this project will be documented in this file.
   - Metadata columns whose names collide as text (`1` and `"1"`) are refused.
   - Validators refuse a `scoring` that is not a name, a callable or None (it silently fell back to the default
     metric).
-  - `LeaveGroupOutValidator` refuses `test_group_ids` that match no group in the data it cross-validates (they
-    were silently cross-validated).
   - `evaluate` refuses a DataFrame `X` with non-numeric columns, scikit-learn metric functions that need scores
     (`roc_auc_score`, `log_loss`), and trial coordinates named `fold`, `y_true` or `y_pred`.
   - Multilabel `predict_proba` refuses a target with more than two classes, or one trained on a single class other
@@ -48,8 +46,8 @@ All notable changes to this project will be documented in this file.
 - `GroupedKFoldValidator` and `SampledDomainKFoldValidator` keep windows cut from one trial (`orig_trial`) on one
   side of every split and of the holdout, as `KFoldValidator` already did. Trial numbers are taken per subject and
   session; stratification is turned off, with a warning, when labels vary among a trial's windows; and windows of
-  one trial with different domains (or groups, when `train_groups`, `val_groups` or `test_groups` is set) are
-  refused, since they would put the trial on both sides.
+  one trial in both a source and a target domain (or, with `test_groups`, in groups on both sides of the
+  holdout) are refused, since they would put the trial on both sides.
 - The Tuner works on copies of the pipelines and validator it is given, so seeding and tuning no longer change them.
 - Band-pass, multitaper and Hilbert phase transforms warn when `fs` matches neither `attrs["sfreq"]` nor the
   spacing of the time coordinate (in seconds, ms or µs; without units, any of them unless the spacing is a whole

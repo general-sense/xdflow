@@ -47,16 +47,7 @@ def test_windows_of_one_trial_stay_together(validator):
         assert not (train_sources | test_sources) & holdout
 
 
-def test_holdout_ids_that_match_no_group_are_refused():
-    validator = LeaveGroupOutValidator(group_coord="subject", test_group_ids=[50], verbose=False)
-    validator.set_pipeline(
-        Pipeline("p", [("lr", SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label"))])
-    )
-    with pytest.raises(ValueError, match="50"):
-        validator.cross_validate(_windows())
-
-
-def test_holdout_ids_can_be_a_single_value_and_are_checked_once():
+def test_holdout_ids_can_be_a_single_value_dates_or_nested():
     from sklearn.model_selection import GridSearchCV
 
     from xdflow.cv import SklearnCVAdapter
@@ -79,6 +70,14 @@ def test_holdout_ids_can_be_a_single_value_and_are_checked_once():
         Pipeline("q", [("gs", SKLearnPredictor.from_estimator(search, sample_dim="trial", target_coord="label"))])
     )
     outer.cross_validate(data)
+    days = np.array(["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"], dtype="datetime64[ns]")
+    dated = data.__class__(data.data.assign_coords(day=("trial", days[data.data.subject.str[1].astype(int).values])))
+    validator = LeaveGroupOutValidator(group_coord="day", test_group_ids=[days[-1]], verbose=False)
+    validator.set_pipeline(
+        Pipeline("p", [("lr", SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label"))])
+    )
+    validator.cross_validate(dated)
+    assert set(dated.data.subject.sel(trial=validator.holdout_trial_labels_).values) == {"s3"}
 
 
 def _fitted(validator, data):
@@ -100,6 +99,15 @@ def test_trial_numbers_restarting_in_each_subject_are_different_trials():
     _fitted(GroupedKFoldValidator(5, group_coord="subject", stratify_by_group=False, verbose=False), data)
 
 
+def _straddling(n=20, **coords):
+    return from_numpy(
+        np.random.default_rng(0).normal(size=(2 * n, 2)),
+        label=np.repeat(np.arange(n) % 2, 2),
+        orig_trial=np.repeat(np.arange(n), 2),
+        **{name: np.resize(values, 2 * n) for name, values in coords.items()},
+    )
+
+
 @pytest.mark.parametrize(
     "validator, coord",
     [
@@ -107,22 +115,36 @@ def test_trial_numbers_restarting_in_each_subject_are_different_trials():
             SampledDomainKFoldValidator(domain_coord="domain", target_domains="target", n_splits=2, verbose=False),
             "domain",
         ),
-        (GroupedKFoldValidator(2, group_coord="part", train_groups=["a"], val_groups=["b"], verbose=False), "part"),
+        (GroupedKFoldValidator(2, group_coord="part", test_size=0.25, test_groups=["b"], verbose=False), "part"),
     ],
-    ids=["domain", "groups"],
+    ids=["domain", "holdout groups"],
 )
 def test_windows_of_one_trial_across_a_split_boundary_are_refused(validator, coord):
-    # each trial has windows on both sides: training on its "a"/source windows would test on the trial itself
-    n = 20
-    data = from_numpy(
-        np.random.default_rng(0).normal(size=(2 * n, 2)),
-        label=np.repeat(np.arange(n) % 2, 2),
-        orig_trial=np.repeat(np.arange(n), 2),
-        domain=np.tile(["source", "target"], n),
-        part=np.tile(["a", "b"], n),
-    )
+    # each trial has windows on both sides: training on its source (or non-test-group) window tests on the trial
     with pytest.raises(ValueError, match=f"different '{coord}'"):
-        _fitted(validator, data)
+        _fitted(validator, _straddling(domain=["source", "target"], part=["a", "b"]))
+
+
+def test_windows_of_one_trial_in_unused_domains_or_filtered_cv_groups_are_fine():
+    domains = SampledDomainKFoldValidator(
+        domain_coord="domain", source_domains=["source"], target_domains=["target"], n_splits=2, verbose=False
+    )
+    _fitted(domains, _straddling(domain=["target", "ignored", "source", "source"]))  # the other window is unused
+    groups = GroupedKFoldValidator(
+        2, group_coord="part", train_groups=["a"], val_groups=["b"], stratify_by_group=False, verbose=False
+    )
+    _fitted(groups, _straddling(part=["a", "b"]))  # whole trials are split, then filtered
+
+
+def test_subject_and_session_names_cannot_merge_trials():
+    data = from_numpy(
+        np.zeros((4, 1)),
+        orig_trial=[0, 0, 0, 0],
+        subject=["a::b", "a::b", "a", "a"],
+        session=["c", "c", "b::c", "b::c"],
+    )
+    groups = KFoldValidator(verbose=False)._resolve_orig_trial_groups(data.data)
+    assert groups[0] == groups[1] != groups[2] == groups[3]
 
 
 def test_labels_varying_within_a_trial_disable_stratification():

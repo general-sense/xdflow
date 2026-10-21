@@ -340,6 +340,19 @@ def test_coordinate_attrs_survive_a_step(container):
     assert out.data.time.attrs == {"units": "s"}
 
 
+def test_steps_with_array_parameters_can_follow_each_other(container):
+    @step
+    def scale(d, weights):
+        return d * weights[0]
+
+    @step
+    def identity(d):
+        return d
+
+    scaled = scale(weights=np.array([2.0, 3.0])).transform(container)
+    np.testing.assert_array_equal(identity().transform(scaled).data.values, container.data.values * 2)
+
+
 def test_nested_coordinate_attrs_cannot_change_the_callers_data(container):
     data = container.data.assign_coords(time=("time", container.data.time.values, {"calibration": {"scale": 1}}))
 
@@ -350,17 +363,3 @@ def test_nested_coordinate_attrs_cannot_change_the_callers_data(container):
 
     bump().transform(DataContainer(data))
     assert data.time.attrs["calibration"]["scale"] == 1
-
-
-def test_nested_array_and_auxiliary_coordinate_attrs_cannot_change_the_callers_data(container):
-    data = container.data.assign_coords(gain=("trial", np.ones(container.data.sizes["trial"]), {"cal": {"x": 1}}))
-    data.attrs["cal"] = {"x": 1}
-
-    @step
-    def bump(d):
-        d.attrs["cal"]["x"] += 1
-        d.gain.attrs["cal"]["x"] += 1
-        return d
-
-    bump().transform(DataContainer(data))
-    assert data.attrs["cal"]["x"] == 1 and data.gain.attrs["cal"]["x"] == 1

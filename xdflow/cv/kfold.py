@@ -359,7 +359,7 @@ class GroupedKFoldValidator(CrossValidator):
 
         all_trials = container.data.trial.values
         all_groups = container.data.coords[self.group_coord].values
-        if self.test_groups is not None or self.train_groups is not None or self.val_groups is not None:
+        if self.test_groups is not None:  # holdout scoring trains on every trial outside the kept test groups
             self._refuse_units_across(container.data, all_groups, f"'{self.group_coord}'")
 
         if self.test_size is None or self.test_size == 0:
@@ -423,8 +423,6 @@ class GroupedKFoldValidator(CrossValidator):
         # Select the relevant part of the container first
         cv_container = container.data.sel(trial=indices_to_split)
         cv_groups = cv_container.coords[self.group_coord].values
-        if self.train_groups is not None or self.val_groups is not None:
-            self._refuse_units_across(cv_container, cv_groups, f"'{self.group_coord}'")
 
         # Now get labels directly from this smaller container
         # Determine stratification coordinate (use stratify_coord if set, otherwise use final_target_coord_)

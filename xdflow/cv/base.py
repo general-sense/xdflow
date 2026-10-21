@@ -425,15 +425,22 @@ class CrossValidator(ABC):
                 f"orig_trial coordinate must have dimension ('trial',), but has {data.coords['orig_trial'].dims}."
             )
 
-        # orig_trial may restart in each subject and session (as check_split assumes): trials of different ones differ
+        orig_values = data.coords["orig_trial"].values
+        if "session" in data.coords and data.coords["session"].dims == ("trial",):
+            session_values = data.coords["session"].values
+            groups = np.asarray([f"{session}::{orig}" for session, orig in zip(session_values, orig_values)], dtype=str)
+        else:
+            groups = orig_values.astype(str)
+        # orig_trial may restart in each subject and session (as check_split assumes): trials of different ones
+        # differ. The keys above are kept when they group the same way, so folds stay those of earlier versions.
         scopes = [
-            data.coords[name].values
-            for name in ("subject", "session")
-            if name in data.coords and data.coords[name].dims == ("trial",)
+            name for name in ("subject", "session") if name in data.coords and data.coords[name].dims == ("trial",)
         ]
-        groups = np.asarray(
-            ["::".join(map(str, parts)) for parts in zip(*scopes, data.coords["orig_trial"].values)], dtype=str
-        )
+        scoped = pd.factorize(
+            pd.MultiIndex.from_arrays([data.coords[name].values for name in [*scopes, "orig_trial"]])
+        )[0]
+        if not np.array_equal(pd.factorize(groups)[0], scoped):
+            groups = scoped
         if len(np.unique(data.coords["trial"].values)) == len(np.unique(groups)):
             return None
         return groups

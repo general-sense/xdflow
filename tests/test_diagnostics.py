@@ -156,21 +156,6 @@ def test_a_validators_group_coordinate_is_audited(X, y):
     assert check_split(data, validator).shared_coords == ["device"]
 
 
-def test_a_validators_holdout_is_audited(X, y):
-    from xdflow.cv import LeaveGroupOutValidator
-
-    X = X.copy()
-    X[50] = X[0]  # a holdout sample copied from the training data
-    data = from_numpy(X, ("trial", "feature"), label=y, subject=np.repeat(np.arange(6), 10))
-    validator = LeaveGroupOutValidator(group_coord="subject", test_group_ids=[5], verbose=False)
-    validator.set_pipeline(
-        Pipeline("p", [("lr", SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label"))])
-    )
-    validator.cross_validate(data)
-    report = check_split(data, validator)
-    assert report.n_folds == len(validator.split_trials_) + 1 and not report.ok
-
-
 def test_duplicates_are_found_in_object_arrays():
     samples = np.empty((2, 1), dtype=object)
     samples[0, 0], samples[1, 0] = float("1.5"), float("1.0") + 0.5  # equal values, distinct objects

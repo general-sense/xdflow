@@ -100,7 +100,10 @@ class SampledDomainKFoldValidator(CrossValidator):
             source_mask = np.isin(domain_values, np.asarray(self.source_domains))
         if np.any(source_mask & target_mask):
             raise ValueError("source_domains and target_domains must not overlap.")
-        self._refuse_units_across(container.data, target_mask, f"'{self.domain_coord}' (target or not)")
+        used = source_mask | target_mask  # windows in other domains are never used
+        self._refuse_units_across(
+            container.data.isel(trial=used), target_mask[used], f"'{self.domain_coord}' (source and target)"
+        )
 
         if not target_mask.any():
             raise ValueError(
