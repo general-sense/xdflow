@@ -475,11 +475,17 @@ def test_scikit_learn_models_see_the_labels_themselves():
             cross_val_score(model, X, y, cv=cv, scoring="accuracy"),
             err_msg=str(model),
         )
+    # class_weight keys that are not labels: scikit-learn < 1.9 raises, 1.9 ignores them; evaluate does the same
     labels = y.astype(str)
-    with pytest.raises(Exception, match="class_weight|classes"):
-        cross_val_score(LogisticRegression(class_weight={1: 20.0}), X, labels, cv=cv, error_score="raise")
-    with pytest.raises(Exception, match="class_weight|classes"):
-        evaluate(LogisticRegression(class_weight={1: 20.0}), X, labels, cv=cv)
+    try:
+        expected = cross_val_score(LogisticRegression(class_weight={1: 20.0}), X, labels, cv=cv, error_score="raise")
+    except ValueError:
+        with pytest.raises(Exception, match="class_weight|classes"):
+            evaluate(LogisticRegression(class_weight={1: 20.0}), X, labels, cv=cv)
+    else:
+        np.testing.assert_allclose(
+            evaluate(LogisticRegression(class_weight={1: 20.0}), X, labels, cv=cv).fold_scores, expected
+        )
 
 
 def test_windows_of_one_trial_stay_together_with_integer_labels():
