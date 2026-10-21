@@ -187,18 +187,11 @@ class SKLearnTransform(Transform, SampleWeightMixin):
             if data.indexes[dim].equals(fitted):
                 continue
             positions = data.indexes[dim].get_indexer(fitted)
-            if (
-                positions < 0
-            ).any():  # float labels rebuilt elsewhere (np.linspace, float32) can differ in the last bits
-                scale = _float_scale(fitted, data.indexes[dim])
-                approximate = _approximate_labels(data.indexes[dim], scale)
-                approximate_fitted = _approximate_labels(fitted, scale)
-                if approximate.is_unique and approximate_fitted.is_unique:
-                    positions = approximate.get_indexer(approximate_fitted)
-            if (positions < 0).any():
+            if (positions < 0).any():  # matched exactly: float labels rebuilt elsewhere must be assigned back
                 missing = list(fitted[positions < 0][:5])
                 raise ValueError(
-                    f"{type(self).__name__} was fitted with '{dim}' labels missing from this data: {missing}"
+                    f"{type(self).__name__} was fitted with '{dim}' labels missing from this data: {missing}. "
+                    f"If they differ only by rounding, assign the fitted labels: data.assign_coords({dim}=...)."
                 )
             data = data.isel({dim: positions})
         return data
@@ -741,38 +734,3 @@ def _positive_class_probability(probabilities: np.ndarray, classes: Any) -> np.n
             return np.full(len(probabilities), float(seen))
         raise ValueError(f"A multilabel target was trained on class {seen!r} alone, so its positive class is unknown.")
     raise ValueError(f"Multilabel targets must be binary; one has classes {classes.tolist()}.")
-
-
-def _float_scale(*indexes: pd.Index) -> float:
-    """Largest finite float magnitude among the indexes (or their float levels)."""
-    largest = 0.0
-    for index in indexes:
-        levels = (
-            [index.get_level_values(i) for i in range(index.nlevels)] if isinstance(index, pd.MultiIndex) else [index]
-        )
-        for level in levels:
-            values = np.asarray(level)
-            if np.issubdtype(values.dtype, np.floating) and np.isfinite(values).any():
-                largest = max(largest, float(np.abs(values[np.isfinite(values)]).max()))
-    return largest
-
-
-def _approximate_labels(index: pd.Index, scale: float) -> pd.Index:
-    """Float labels (or float levels) rounded to 7 significant digits each (float32's precision); values below
-    1e-9 of the largest label across both indexes count as 0. Whole numbers stay exact: 12345678.0 and 12345679.0
-    are different labels, not one label rebuilt in float32."""
-
-    def rounded(values: Any) -> np.ndarray:
-        values = np.asarray(values)
-        if not np.issubdtype(values.dtype, np.floating):
-            return values
-        values = values.astype(float)
-        whole = values == np.round(values)
-        floored = np.where(np.abs(values) < 1e-9 * scale, 0.0, values)
-        return np.array(
-            [value if exact else float(f"{near:.7g}") for value, near, exact in zip(values, floored, whole)]
-        )
-
-    if isinstance(index, pd.MultiIndex):
-        return pd.MultiIndex.from_arrays([rounded(index.get_level_values(level)) for level in range(index.nlevels)])
-    return pd.Index(rounded(index))

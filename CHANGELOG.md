@@ -31,7 +31,8 @@ All notable changes to this project will be documented in this file.
 
 - New checks that raise instead of computing something else:
   - Predictors refuse new data whose dims differ from those seen at fit, or that lacks the labels of a fitted dim
-    (a transposed or reordered layout is realigned).
+    (a transposed or reordered layout is realigned). Labels must match exactly, so float labels rebuilt with
+    rounding differences need the fitted labels assigned back.
   - `metadata=` or a `y`/`groups` Series indexed by the data's trial labels in another order is refused (rows
     otherwise match trials by position, as in scikit-learn).
   - Metadata columns whose names collide as text (`1` and `"1"`) are refused.

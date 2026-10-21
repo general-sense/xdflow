@@ -332,22 +332,21 @@ def test_a_multilabel_target_seen_with_one_class_reads_its_classes_not_its_colum
     np.testing.assert_allclose(proba[:, 0], 1.0)
 
 
-def test_new_data_with_float_labels_a_few_ulps_off_is_accepted(X, y):
+def test_new_data_with_float_labels_a_few_ulps_off_is_refused_with_the_fix(X, y):
     import xarray as xr
 
     from xdflow import DataContainer
 
     data = xr.DataArray(X, dims=DIMS, coords={**COORDS, "label": ("trial", y)})
-    flat = make_pipeline(  # no crop, whose window boundary would itself move
+    flat = make_pipeline(
         FlattenTransform(dims=("channel", "time")),
         SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label"),
     )
     fitted = flat.fit(DataContainer(data))
     unlabeled = data.drop_vars("label")
     nudged = unlabeled.assign_coords(time=unlabeled.time.values + 1e-15)
-    np.testing.assert_array_equal(
-        fitted.predict(DataContainer(nudged)).data.values, fitted.predict(DataContainer(unlabeled)).data.values
-    )
+    with pytest.raises(ValueError, match="assign the fitted labels"):
+        fitted.predict(DataContainer(nudged))
 
 
 def test_float_labels_that_really_differ_are_not_matched():
@@ -365,10 +364,6 @@ def test_float_labels_that_really_differ_are_not_matched():
     moved = data.drop_vars("label").assign_coords(freq=np.array([1.0, 2.0, 3.0, 1e5]))
     with pytest.raises(Exception, match="missing"):
         fitted.predict(DataContainer(moved))
-    whole = data.assign_coords(freq=np.array([1.5, 2.5, 12345678.0, 1e9]))  # whole numbers are exact labels
-    fitted = pipeline.fit(DataContainer(whole))
-    with pytest.raises(Exception, match="missing"):
-        fitted.predict(DataContainer(whole.drop_vars("label").assign_coords(freq=[1.5, 2.5, 12345679.0, 1e9])))
 
 
 def test_predicted_labels_that_only_equal_a_class_after_rounding_are_refused():
