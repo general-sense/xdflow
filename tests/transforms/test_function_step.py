@@ -353,6 +353,20 @@ def test_steps_with_array_parameters_can_follow_each_other(container):
     np.testing.assert_array_equal(identity().transform(scaled).data.values, container.data.values * 2)
 
 
+def test_a_step_that_copies_its_input_can_follow_one_with_array_parameters(container):
+    @step
+    def scale(d, weights):
+        return d * weights[0]
+
+    @step
+    def copied(d):
+        return d.copy()  # deep-copies the history, parameter arrays included
+
+    out = copied().transform(scale(weights=np.array([2.0, 3.0])).transform(container))
+    np.testing.assert_array_equal(out.data.values, container.data.values * 2)
+    assert [entry["class"] for entry in out.data.attrs["data_history"]][-2:] == ["scale", "copied"]
+
+
 def test_nested_coordinate_attrs_cannot_change_the_callers_data(container):
     data = container.data.assign_coords(time=("time", container.data.time.values, {"calibration": {"scale": 1}}))
 

@@ -475,7 +475,10 @@ class Transform(ABC):
         source_history = list(source_container.data.attrs.get("data_history", []))
         output_history = list(attrs.get("data_history", []))
 
-        if output_history[: len(source_history)] == source_history:
+        # By class name: entries hold parameters (arrays) that compare elementwise, and copies of them after data.copy()
+        if [entry.get("class") for entry in output_history[: len(source_history)]] == [
+            entry.get("class") for entry in source_history
+        ]:
             history = output_history
         else:
             # If output history diverges, treat it as extra output-local provenance after lost source history.

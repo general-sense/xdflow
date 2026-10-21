@@ -392,7 +392,7 @@ class CrossValidator(ABC):
         to split, their labels (None if labels vary within a unit), and a function turning unit positions back into
         trial positions."""
         groups = self._resolve_orig_trial_groups(data)
-        if groups is None:
+        if groups is None or np.unique(groups).size == data.sizes["trial"]:  # one window per trial: split trials
             return np.arange(data.sizes["trial"]), labels, lambda positions: positions
         _, first, inverse = np.unique(groups, return_index=True, return_inverse=True)
         unit_labels = None if labels is None else np.asarray(labels)[first]
@@ -407,9 +407,10 @@ class CrossValidator(ABC):
 
     def _refuse_units_across(self, data, values: np.ndarray, boundary: str) -> None:
         """Windows cut from one trial (``orig_trial``) must all fall on one side of a boundary the validator splits
-        on; otherwise those on the training side train on the trial being tested."""
+        on; otherwise those on the training side train on the trial being tested. NaN values (unused windows) are
+        ignored."""
         groups = self._resolve_orig_trial_groups(data)
-        if groups is not None and pd.Series(np.asarray(values)).groupby(groups).nunique(dropna=False).max() > 1:
+        if groups is not None and pd.Series(np.asarray(values)).groupby(groups).nunique().max() > 1:
             raise ValueError(
                 f"Windows of one trial (orig_trial) have different {boundary} values, so they would be split across "
                 "training and testing. Give each trial's windows one value."
@@ -424,6 +425,9 @@ class CrossValidator(ABC):
             raise ValueError(
                 f"orig_trial coordinate must have dimension ('trial',), but has {data.coords['orig_trial'].dims}."
             )
+
+        if len(np.unique(data.coords["trial"].values)) == len(np.unique(data.coords["orig_trial"].values)):
+            return None
 
         orig_values = data.coords["orig_trial"].values
         if "session" in data.coords and data.coords["session"].dims == ("trial",):
@@ -441,8 +445,6 @@ class CrossValidator(ABC):
         )[0]
         if not np.array_equal(pd.factorize(groups)[0], scoped):
             groups = scoped
-        if len(np.unique(data.coords["trial"].values)) == len(np.unique(groups)):
-            return None
         return groups
 
     @staticmethod

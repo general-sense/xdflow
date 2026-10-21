@@ -359,8 +359,9 @@ class GroupedKFoldValidator(CrossValidator):
 
         all_trials = container.data.trial.values
         all_groups = container.data.coords[self.group_coord].values
-        if self.test_groups is not None:  # holdout scoring trains on every trial outside the kept test groups
-            self._refuse_units_across(container.data, all_groups, f"'{self.group_coord}'")
+        if self.test_groups is not None and self.test_size:  # holdout scoring trains on all but the kept test groups
+            in_test_groups = np.isin(all_groups, np.asarray(self.test_groups))
+            self._refuse_units_across(container.data, in_test_groups, f"'{self.group_coord}' (in test_groups or not)")
 
         if self.test_size is None or self.test_size == 0:
             # No holdout set - use all data for cross-validation

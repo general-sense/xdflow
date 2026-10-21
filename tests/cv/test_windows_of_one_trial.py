@@ -136,6 +136,13 @@ def test_windows_of_one_trial_in_unused_domains_or_filtered_cv_groups_are_fine()
     _fitted(groups, _straddling(part=["a", "b"]))  # whole trials are split, then filtered
 
 
+def test_holdout_test_groups_refuse_only_trials_with_windows_on_both_sides():
+    # windows of one trial in groups "a" and "b", none in the test group "c": nothing is held out from them
+    data = _straddling(part=["a", "b", "c", "c"])
+    _fitted(GroupedKFoldValidator(2, group_coord="part", test_size=0.25, test_groups=["c"], verbose=False), data)
+    _fitted(GroupedKFoldValidator(2, group_coord="part", test_groups=["b"], verbose=False), data)  # no holdout
+
+
 def test_subject_and_session_names_cannot_merge_trials():
     data = from_numpy(
         np.zeros((4, 1)),
