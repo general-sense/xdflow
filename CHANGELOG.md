@@ -40,6 +40,8 @@ All notable changes to this project will be documented in this file.
     metric).
   - `evaluate` refuses a DataFrame `X` with non-numeric columns, scikit-learn metric functions that need scores
     (`roc_auc_score`, `log_loss`), and trial coordinates named `fold`, `y_true` or `y_pred`.
+  - `EnsemblePredictor(weighting_strategy="score_based")` refuses to fit without `calibration_container`. It scored
+    members on their own training data, which gives members that memorise the largest weights.
   - Multilabel `predict_proba` refuses a target with more than two classes, or one trained on a single class other
     than 0 or 1 (its positive class is unknown). A target trained only on 0 (or only on 1) gives probability 0
     (or 1); it gave the probability of the class it saw.

@@ -189,7 +189,7 @@ class EnsemblePredictor(CompositeTransform, Predictor):
         normalize_weights: Whether to normalize weights to sum to 1
         normalize_outputs: Whether to normalize final ensemble outputs
         n_jobs: Number of parallel jobs for execution
-        calibration_container: Optional container for score-based weighting calibration
+        calibration_container: Held-out data that score-based weighting scores members on (required for it)
     """
 
     def __init__(
@@ -226,7 +226,7 @@ class EnsemblePredictor(CompositeTransform, Predictor):
             normalize_weights: Whether to normalize weights to sum to 1
             normalize_outputs: Whether to normalize final outputs
             n_jobs: Number of parallel jobs to use
-            calibration_container: Data for score-based weight calibration
+            calibration_container: Held-out data for score-based weighting (required for it)
             proba: Whether to return probabilities by default
             sel: Optional selection to apply before predicting
             drop_sel: Optional drop selection to apply before predicting
@@ -506,6 +506,11 @@ class EnsemblePredictor(CompositeTransform, Predictor):
             container: Possibly encoded DataContainer produced by Predictor.fit
             **kwargs: Additional context/parameters passed through
         """
+        if self.weighting_strategy == "score_based" and self.calibration_container is None:
+            # scored on their own training data, members that memorise would get the largest weights
+            raise ValueError(
+                "weighting_strategy='score_based' needs calibration_container=: held-out data to score members on."
+            )
         original_container = container
         if self.is_classifier and f"{self.target_coord}_orig" in container.data.coords:
             original_da = self._reset_target_coord(container.data)
@@ -532,9 +537,8 @@ class EnsemblePredictor(CompositeTransform, Predictor):
 
         self._ensure_shared_encoders()
 
-        calibration_data = self.calibration_container or original_container
         if self.weighting_strategy == "score_based":
-            self._compute_weights(calibration_data, **kwargs)
+            self._compute_weights(self.calibration_container, **kwargs)
 
         return self
 
