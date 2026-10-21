@@ -44,7 +44,8 @@ def step(
 
     The function returns an ``xr.DataArray``, or a NumPy array with the same shape as its input (it is given
     the input's dims and coords). It receives a read-only view of the data, so in-place edits raise instead of
-    changing the caller's data.
+    changing the caller's data. As everywhere in xarray, ``attrs`` are shared, not copied: copy a nested value
+    before changing it.
 
     **Steps without ``fit``** must compute each trial's output from that trial alone (filtering, cropping,
     band power...). That is what lets cross-validation run them once on all trials. Each call runs a quick

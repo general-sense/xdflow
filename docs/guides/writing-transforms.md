@@ -38,7 +38,8 @@ pipeline.set_params(log_band_power__band=(13.0, 30.0))  # tuners use the same pa
 - The function receives the data and returns an `xr.DataArray`, or a NumPy array
   with the same shape as its input (it gets the input's dims and coords).
 - The input is a read-only view, so an in-place edit such as `data *= 2` raises
-  instead of changing the caller's data.
+  instead of changing the caller's data. As everywhere in xarray, `attrs` are shared,
+  not copied: copy a nested value (`dict(data.attrs["cal"])`) before changing it.
 - A step without `fit` must compute each trial from that trial alone. Cross-validation
   relies on this to compute it once for all folds, and every call runs a quick check,
   rerunning the function on three trials alone. A function that uses other trials,
