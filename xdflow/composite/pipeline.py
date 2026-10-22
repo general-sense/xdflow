@@ -250,6 +250,12 @@ class Pipeline(CompositeTransform):
         Returns:
             DataContainer transformed up to the final step
         """
+        if not isinstance(container, DataContainer):
+            raise TypeError(
+                f"Expected a DataContainer, got {type(container).__name__}. Wrap NumPy arrays with "
+                "xdflow.from_numpy(X, dims), an xr.DataArray with DataContainer(data), and MNE Epochs with "
+                "xdflow.from_mne_epochs(epochs)."
+            )
 
         transformed_container = container
         if len(self.steps) > 1:
@@ -363,3 +369,45 @@ class Pipeline(CompositeTransform):
             )
 
         return labels
+
+
+def make_pipeline(*steps: Transform, name: str = "pipeline", use_cache: bool = False) -> Pipeline:
+    """Build a ``Pipeline`` from transforms, naming each step after its class (like scikit-learn's).
+
+    Step names are the lowercased class names without a ``Transform`` suffix (``"zscore"`` for
+    ``ZScoreTransform``), the estimator name for scikit-learn wrappers (``"logisticregression"``), or the
+    function name for ``@step`` functions, with ``-1``, ``-2``... appended when a name repeats. Use them in
+    parameter paths such as ``"zscore__per_dim"``.
+
+    Example:
+        >>> pipeline = make_pipeline(BandpassFilterTransform(8, 30, fs=160), CSPTransform(), predictor)
+    """
+    for transform in steps:
+        if isinstance(transform, type):
+            raise TypeError(
+                f"make_pipeline got the class {transform.__name__}; pass an instance: {transform.__name__}()."
+            )
+        if not isinstance(transform, Transform):
+            raise TypeError(
+                f"make_pipeline got {type(transform).__name__}, which is not an xdflow Transform. Wrap scikit-learn "
+                "estimators with SKLearnPredictor.from_estimator(...) or SKLearnTransformer(...)."
+            )
+    # Wrapped scikit-learn estimators are named after the estimator ("logisticregression"), not the wrapper.
+    base_names = [_step_name(transform) for transform in steps]
+    counts = {base: base_names.count(base) for base in base_names}
+    seen: dict[str, int] = {}
+    named = []
+    for base, transform in zip(base_names, steps):
+        if counts[base] > 1:
+            seen[base] = seen.get(base, 0) + 1
+            named.append((f"{base}-{seen[base]}", transform))
+        else:
+            named.append((base, transform))
+    return Pipeline(name, named, use_cache=use_cache)
+
+
+def _step_name(transform: Transform) -> str:
+    """Lowercased class name without a "Transform" suffix; scikit-learn wrappers use the estimator's name."""
+    estimator = getattr(transform, "_base_estimator_cls", None) or getattr(transform, "estimator_cls", None)
+    name = str(getattr(estimator, "__name__", type(transform).__name__)).lower()
+    return name.removesuffix("transform") or name

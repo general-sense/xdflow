@@ -55,7 +55,8 @@ def _subclasses(cls: type) -> set[type]:
 
 _import_transform_modules()
 
-_NOT_CONCRETE = {"AdaptiveTransform"}  # a base class: each concrete aligner supplies its _STRATEGY_MAP
+# Base classes: each concrete aligner supplies its _STRATEGY_MAP; each @step function its own subclass
+_NOT_CONCRETE = {"AdaptiveTransform", "_FunctionStep"}
 CLASSES = sorted(
     (
         c
@@ -327,6 +328,7 @@ def _parent_arg_names(cls: type) -> set[str]:
 _PARENT_VALUES: dict[str, Callable[[], Any]] = {
     "allow_unknown_targets": lambda: False,
     "drop_sel": lambda: {"stimulus": ["b"]},
+    "fit_on_labels": lambda: True,
     "sample_weight_coord": lambda: "weight",
     "sel": lambda: {"stimulus": ["a"]},
     "unknown_target_encoding": lambda: -7,

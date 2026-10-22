@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterator
 from typing import Any, cast
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 from sklearn.metrics import (
     accuracy_score,
@@ -28,7 +29,10 @@ from xdflow.core.data_container import DataContainer
 from xdflow.transforms import Predictor
 from xdflow.utils.cache_utils import (
     _get_object_metadata,
+    _installed_code_fingerprint,
+    cache_user_code,
     get_module_hashes_for_object,
+    references_user_code,
     save_cached_object,
     try_load_cached_object,
 )
@@ -76,6 +80,61 @@ def _cleanup_torch_memory() -> None:
             torch.cuda.ipc_collect()
     except Exception:
         pass
+
+
+def iter_predictors(transform: Transform | None) -> Iterator[Predictor]:
+    """Yield all Predictor instances within a transform recursively."""
+    from xdflow.composite import CompositeTransform
+    from xdflow.transforms import Transform as TransformType
+
+    if transform is None:
+        return
+
+    if isinstance(transform, Predictor):
+        yield transform
+        return
+
+    if isinstance(transform, CompositeTransform):
+        children = list(transform.children)
+        # GroupApplyTransform's children exist only after fit; its template is what the groups are cloned from
+        template = getattr(transform, "transform_template", None)
+        if isinstance(template, TransformType) and not any(child is template for child in children):
+            children.append(template)
+        for child in children:
+            if isinstance(child, TransformType):
+                yield from iter_predictors(child)
+
+
+def fit_label_encoders(pipeline: Transform, container: DataContainer) -> None:
+    """Fit provided encoders in-place for all predictors on the full dataset.
+
+    This learns the label vocabulary globally (including holdout if present)
+    without leaking feature-target relationships across folds.
+    """
+    for predictor in iter_predictors(pipeline):
+        if not getattr(predictor, "is_classifier", False):
+            continue
+        if getattr(predictor, "is_multilabel", False):
+            continue
+        target_coord = predictor.target_coord  # required arg for predictors
+        encoder = predictor.encoder  # required for classifiers, should error otherwise
+
+        if target_coord not in container.data.coords:
+            raise ValueError(
+                f"The target_coord '{target_coord}' specified in a predictor was not found in the data container's coordinates."
+            )
+        labels = container.data.coords[target_coord].values
+        unique_labels = np.unique(labels)
+        if hasattr(encoder, "classes_"):
+            existing = getattr(encoder, "classes_", None)
+            try:
+                if existing is not None and np.array_equal(existing, unique_labels):
+                    continue  # already fitted with correct classes
+            except Exception:
+                pass
+        if not hasattr(encoder, "fit"):
+            raise TypeError(f"Encoder for target '{target_coord}' must have a fit method")
+        encoder.fit(labels)
 
 
 class CrossValidator(ABC):
@@ -150,7 +209,7 @@ class CrossValidator(ABC):
     def __init__(
         self,
         pooling_score_weight: float = 0.0,
-        use_stateful_fit_cache: bool = True,
+        use_stateful_fit_cache: bool = False,
         release_fold_memory: bool = False,
         scoring: str | Callable | None = None,
         scoring_needs_proba: bool = False,
@@ -166,7 +225,9 @@ class CrossValidator(ABC):
                 score (0.0) and the pooled OOF score (1.0). Defaults to 0.0.
                 Must be between 0.0 and 1.0.
                 Higher values give more weight to folds with more trials.
-            use_stateful_fit_cache: Whether to cache stateful transforms during CV.
+            use_stateful_fit_cache: Whether to reuse fitted fold pipelines cached on disk by earlier identical runs.
+                Off by default: a reused fit of an estimator without ``random_state`` repeats one random draw, so
+                for example a seed study would show no variance. Steps that learn nothing run once per run either way.
             release_fold_memory: Whether to aggressively release per-fold objects and
                 clear PyTorch CUDA caches after each fold.
             scoring: Metric name or callable. If None, classification defaults
@@ -202,6 +263,7 @@ class CrossValidator(ABC):
         self.oof_probabilities_ = []  # Out-of-fold probabilities/scores
         self.true_labels_ = []
         self.oof_containers_: list[DataContainer] = []  # Per-fold scored predictions with their trial coords
+        self.split_trials_: list[tuple[np.ndarray, np.ndarray]] = []  # (train, validation) trial labels per fold
         # Class order at evaluation time; finalize_pipeline may later refit the template's encoder
         self.oof_class_labels_: list[Any] | None = None
         self.holdout_class_labels_: list[Any] | None = None
@@ -303,7 +365,11 @@ class CrossValidator(ABC):
         n_unique = len(unique)
         min_count = counts.min() if counts.size else 0
 
-        if n_unique > 100:
+        if (
+            n_unique > 100
+            and np.issubdtype(np.asarray(labels).dtype, np.floating)
+            and not np.all(np.mod(np.asarray(labels, dtype=float), 1) == 0)
+        ):  # many classes are fine; many non-integral values look like a continuous target
             raise ValueError(
                 f"Stratification coord in {context} has too many unique values ({n_unique}). "
                 "This looks continuous; bin the coord before stratifying."
@@ -319,6 +385,35 @@ class CrossValidator(ABC):
             raise ValueError(
                 f"Stratification coord in {context} has classes with fewer than 2 samples (min_count={min_count}). "
                 "train_test_split with stratify requires at least 2 samples per class. Bin or filter before stratifying."
+            )
+
+    def _split_units(self, data, labels: np.ndarray | None) -> tuple[np.ndarray, np.ndarray | None, Callable]:
+        """Windows cut from one trial (``orig_trial``) stay on one side of every split: the positions of the units
+        to split, their labels (None if labels vary within a unit), and a function turning unit positions back into
+        trial positions."""
+        groups = self._resolve_orig_trial_groups(data)
+        if groups is None or np.unique(groups).size == data.sizes["trial"]:  # one window per trial: split trials
+            return np.arange(data.sizes["trial"]), labels, lambda positions: positions
+        _, first, inverse = np.unique(groups, return_index=True, return_inverse=True)
+        unit_labels = None if labels is None else np.asarray(labels)[first]
+        if labels is not None and pd.Series(np.asarray(labels)).groupby(inverse).nunique(dropna=False).max() > 1:
+            warnings.warn(
+                "Stratification labels vary within windows of one trial (orig_trial). "
+                "Disabling stratification for this split.",
+                stacklevel=3,
+            )
+            unit_labels = None
+        return np.arange(first.size), unit_labels, lambda positions: np.flatnonzero(np.isin(inverse, positions))
+
+    def _refuse_units_across(self, data, values: np.ndarray, boundary: str) -> None:
+        """Windows cut from one trial (``orig_trial``) must all fall on one side of a boundary the validator splits
+        on; otherwise those on the training side train on the trial being tested. NaN values (unused windows) are
+        ignored."""
+        groups = self._resolve_orig_trial_groups(data)
+        if groups is not None and pd.Series(np.asarray(values)).groupby(groups).nunique().max() > 1:
+            raise ValueError(
+                f"Windows of one trial (orig_trial) have different {boundary} values, so they would be split across "
+                "training and testing. Give each trial's windows one value."
             )
 
     def _resolve_orig_trial_groups(self, data) -> np.ndarray | None:
@@ -337,9 +432,20 @@ class CrossValidator(ABC):
         orig_values = data.coords["orig_trial"].values
         if "session" in data.coords and data.coords["session"].dims == ("trial",):
             session_values = data.coords["session"].values
-            return np.asarray([f"{session}::{orig}" for session, orig in zip(session_values, orig_values)], dtype=str)
-
-        return orig_values.astype(str)
+            groups = np.asarray([f"{session}::{orig}" for session, orig in zip(session_values, orig_values)], dtype=str)
+        else:
+            groups = orig_values.astype(str)
+        # orig_trial may restart in each subject and session (as check_split assumes): trials of different ones
+        # differ. The keys above are kept when they group the same way, so folds stay those of earlier versions.
+        scopes = [
+            name for name in ("subject", "session") if name in data.coords and data.coords[name].dims == ("trial",)
+        ]
+        scoped = pd.factorize(
+            pd.MultiIndex.from_arrays([data.coords[name].values for name in [*scopes, "orig_trial"]])
+        )[0]
+        if not np.array_equal(pd.factorize(groups)[0], scoped):
+            groups = scoped
+        return groups
 
     @staticmethod
     def _get_unique_groups_and_labels(
@@ -373,7 +479,8 @@ class CrossValidator(ABC):
                 return unique_groups, None
             group_labels.append(unique_labels[0])
 
-        return unique_groups, np.array(group_labels, dtype=object)
+        # In the labels' own dtype: an object array of integers is not a class target for scikit-learn's splitters.
+        return unique_groups, np.array(group_labels, dtype=labels.dtype)
 
     # ------------------------------
     # Scoring Function Resolution
@@ -431,6 +538,12 @@ class CrossValidator(ABC):
                     "but the final predictor is not a classifier."
                 )
             return self._scoring_func, self._metric_name, self._scoring_needs_proba
+
+        if self.scoring is not None:
+            raise TypeError(
+                f"scoring must be a metric name, a callable or None; got {type(self.scoring).__name__}. "
+                "Score one metric at a time."
+            )
 
         # Auto-select based on is_classifier and is_multilabel
         if final_predictor.is_classifier:
@@ -526,25 +639,7 @@ class CrossValidator(ABC):
     # ------------------------------
     def _iter_predictors(self, transform: Transform | None) -> Iterator[Predictor]:
         """Yield all Predictor instances within a transform recursively."""
-        from xdflow.composite import CompositeTransform
-        from xdflow.transforms import Transform as TransformType
-
-        if transform is None:
-            return
-
-        if isinstance(transform, Predictor):
-            yield transform
-            return
-
-        if isinstance(transform, CompositeTransform):
-            children = list(transform.children)
-            # GroupApplyTransform's children exist only after fit; its template is what the groups are cloned from
-            template = getattr(transform, "transform_template", None)
-            if isinstance(template, TransformType) and not any(child is template for child in children):
-                children.append(template)
-            for child in children:
-                if isinstance(child, TransformType):
-                    yield from self._iter_predictors(child)
+        yield from iter_predictors(transform)
 
     def _find_and_fit_encoders(self, pipeline: Pipeline, container: DataContainer):
         """Fit provided encoders in-place for all predictors on the full dataset.
@@ -552,30 +647,7 @@ class CrossValidator(ABC):
         This learns the label vocabulary globally (including holdout if present)
         without leaking feature-target relationships across folds.
         """
-        for predictor in self._iter_predictors(pipeline):
-            if not getattr(predictor, "is_classifier", False):
-                continue
-            if getattr(predictor, "is_multilabel", False):
-                continue
-            target_coord = predictor.target_coord  # required arg for predictors
-            encoder = predictor.encoder  # required for classifiers, should error otherwise
-
-            if target_coord not in container.data.coords:
-                raise ValueError(
-                    f"The target_coord '{target_coord}' specified in a predictor was not found in the data container's coordinates."
-                )
-            labels = container.data.coords[target_coord].values
-            unique_labels = np.unique(labels)
-            if hasattr(encoder, "classes_"):
-                existing = getattr(encoder, "classes_", None)
-                try:
-                    if existing is not None and np.array_equal(existing, unique_labels):
-                        continue  # already fitted with correct classes
-                except Exception:
-                    pass
-            if not hasattr(encoder, "fit"):
-                raise TypeError(f"Encoder for target '{target_coord}' must have a fit method")
-            encoder.fit(labels)
+        fit_label_encoders(pipeline, container)
 
     @property
     def pipeline(self) -> Pipeline:
@@ -716,7 +788,12 @@ class CrossValidator(ABC):
         Returns:
             Fitted pipeline (either newly fitted or loaded from cache)
         """
-        if self.use_stateful_fit_cache:
+        # Fits that depend on user code are not reused: a key cannot cover everything that code depends on.
+        use_cache = self.use_stateful_fit_cache and (
+            cache_user_code() or not references_user_code(fold_pipeline, train_container)
+        )
+        key_dict = None
+        if use_cache:
             # Snapshot the key before fitting: it references live objects that fit mutates, and the
             # save below must use the same key as the lookup.
             key_dict = _get_object_metadata(
@@ -727,9 +804,11 @@ class CrossValidator(ABC):
                         fold_pipeline.get_params(deep=True) if hasattr(fold_pipeline, "get_params") else None
                     ),
                     "module_hashes": get_module_hashes_for_object(fold_pipeline),
+                    "installed_packages": _installed_code_fingerprint(),
                     "train_signature": train_container,
                 }
             )
+        if key_dict is not None:
             cached = try_load_cached_object(prefix="stateful_fit", key_dict=key_dict)
             if cached is None:
                 fold_pipeline.fit(train_container, verbose=verbose)
@@ -890,6 +969,7 @@ class CrossValidator(ABC):
         self.oof_probabilities_ = []
         self.true_labels_ = []
         self.oof_containers_ = []
+        self.split_trials_ = []
         self.oof_class_labels_ = self._snapshot_class_labels()
 
         # Step 7: Run cross-validation loop with stateful pipeline
@@ -897,6 +977,7 @@ class CrossValidator(ABC):
             if self.verbose:
                 print("Running cross-validation with stateful pipeline...")
             for fold_idx, (train_indices, validation_indices) in enumerate(splits):
+                self.split_trials_.append((np.asarray(train_indices), np.asarray(validation_indices)))
                 self._process_cv_fold(
                     fold_idx,
                     train_indices,
@@ -1421,7 +1502,11 @@ class CrossValidator(ABC):
             raise ValueError("No CV scores available. Run cross_validate() first.")
 
         mean_score = self.mean_cv_score_
+        if self.pooling_score_weight == 0:
+            return mean_score  # the pooled score is not needed, and may be undefined (binary F1 of 3 classes)
         pooled_score = self.oof_score_
+        if self.pooling_score_weight == 1:
+            return pooled_score  # fold scores do not count, and may be undefined (R² of one trial)
 
         final_score = (1 - self.pooling_score_weight) * mean_score + self.pooling_score_weight * pooled_score
         return final_score

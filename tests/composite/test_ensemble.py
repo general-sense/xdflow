@@ -1,6 +1,7 @@
 """Tests for ensemble predictors."""
 
 import numpy as np
+import pytest
 import xarray as xr
 
 from xdflow.composite.ensemble import EnsemblePredictor
@@ -133,9 +134,57 @@ def test_score_based_weights_do_not_depend_on_label_type():
             sample_dim="trial",
             target_coord="y",
             weighting_strategy="score_based",
+            calibration_container=data,
         )
         ensemble.fit(data)
         weights.append(ensemble.weights)
 
     np.testing.assert_allclose(weights[0], weights[1])
     assert weights[0][0] > weights[0][1]
+
+
+def test_score_based_weights_align_member_predictions_by_trial():
+    import numpy as np
+    import xarray as xr
+    from sklearn.dummy import DummyClassifier
+    from sklearn.neighbors import KNeighborsClassifier
+
+    from xdflow import DataContainer, EnsemblePredictor, Pipeline
+    from xdflow.transforms.function_step import step
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    @step
+    def reverse(data):
+        return data.isel(trial=slice(None, None, -1))
+
+    rng = np.random.default_rng(0)
+    y = rng.integers(0, 2, 100)
+    data = DataContainer(
+        xr.DataArray(
+            rng.normal(size=(100, 3)) + 3 * y[:, None],
+            dims=("trial", "feature"),
+            coords={"trial": np.arange(100), "label": ("trial", y)},
+        )
+    )
+    knn = SKLearnPredictor(KNeighborsClassifier, sample_dim="trial", target_coord="label", n_neighbors=1)
+    dummy = SKLearnPredictor(DummyClassifier, sample_dim="trial", target_coord="label", strategy="most_frequent")
+    members = [("knn", Pipeline("k", [("reverse", reverse()), ("knn", knn)])), ("dummy", dummy)]
+    ensemble = EnsemblePredictor(
+        members, sample_dim="trial", target_coord="label", weighting_strategy="score_based", calibration_container=data
+    )
+    ensemble.fit(data)
+    accuracy_dummy = max(np.mean(y), 1 - np.mean(y))
+    np.testing.assert_allclose(ensemble.weights, np.array([1.0, accuracy_dummy]) / (1 + accuracy_dummy))
+
+
+def test_score_based_weights_need_held_out_calibration_data():
+    from sklearn.linear_model import LogisticRegression
+
+    from xdflow.transforms.sklearn_transform import SKLearnPredictor
+
+    member = SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="y")
+    ensemble = EnsemblePredictor(
+        [("lr", member)], sample_dim="trial", target_coord="y", weighting_strategy="score_based"
+    )
+    with pytest.raises(ValueError, match="calibration_container"):
+        ensemble.fit(_sklearn_container())

@@ -12,7 +12,7 @@ from xdflow.transforms.normalization import _stat_dims, _warn_if_pooling_trials
 
 def _signal_channel_mask(channel_values: np.ndarray, excluded_channels: Sequence[str] | None) -> np.ndarray:
     """Return a boolean mask selecting signal channels (i.e., not excluded)."""
-    if not excluded_channels:
+    if excluded_channels is None or len(excluded_channels) == 0:  # also for a pandas Index, which has no truth value
         return np.ones(len(channel_values), dtype=bool)
     return ~np.isin(channel_values, np.asarray(excluded_channels, dtype=object))
 
@@ -49,7 +49,7 @@ class CARTransform(Transform):
 
     @property
     def _excluded_channels(self) -> tuple[str, ...]:
-        return tuple(self.excluded_channels or ())
+        return tuple(self.excluded_channels) if self.excluded_channels is not None else ()
 
     def _transform(self, data_container: DataContainer, **kwargs) -> DataContainer:
         """
@@ -110,7 +110,8 @@ class RegressOutReferenceTransform(Transform):
 
     @property
     def _excluded_channels(self) -> tuple[str, ...]:
-        return tuple(set(self.excluded_channels or ()) | {self.reference_channel})
+        excluded = set(self.excluded_channels) if self.excluded_channels is not None else set()
+        return tuple(excluded | {self.reference_channel})
 
     def _fit_models(self, data: xr.DataArray) -> dict[Any, LinearRegression]:
         """One reference->channel regression per target channel, pooling trials and time."""

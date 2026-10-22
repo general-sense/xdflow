@@ -12,6 +12,8 @@ Composition APIs define how transforms are combined while keeping the pipeline v
 
 ::: xdflow.composite.pipeline.Pipeline
 
+::: xdflow.composite.pipeline.make_pipeline
+
 ## Grouped Application
 
 ::: xdflow.composite.group_apply.GroupApplyTransform

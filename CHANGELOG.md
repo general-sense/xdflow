@@ -2,6 +2,78 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-10-21
+
+### Added
+
+- `xdflow.evaluate(model, X, y, groups=..., cv=...)`: cross-validation in one call for NumPy arrays, xarray
+  data or MNE `Epochs` with a scikit-learn estimator, an xdflow pipeline, or xdflow steps followed by an
+  estimator. Reports scores per fold and per group (`.by("subject")`), every out-of-fold prediction with its
+  trial metadata, which steps ran once and which were refit per fold, and a split audit; warns when shuffled
+  folds share subjects or sessions. Metric names follow scikit-learn.
+- `xdflow.check_split(X, cv, ...)`: audits any split (scikit-learn splitters, index pairs, or an xdflow
+  validator after `cross_validate`) for subjects, sessions, runs and source trials shared between training and
+  test sets, and for test samples with an exact copy in the training set.
+- `@xdflow.step`: a function of an `xr.DataArray` becomes a pipeline step whose parameters clone, cache and
+  tune like a built-in transform's. Inputs are read-only, each call checks that trials are processed
+  independently, and `@step(fit=...)` adds state learned on training folds.
+- `xdflow.make_pipeline(*steps)` names steps automatically, as in scikit-learn.
+- `xdflow.to_sklearn(pipeline, dims, coords)`: an xdflow pipeline as a scikit-learn classifier or regressor,
+  for `cross_val_score`, `GridSearchCV` and MOABB.
+- `xdflow.from_numpy(X, dims, metadata=..., **trial_coords)` wraps sample-first arrays.
+- Every built-in transform imports from `xdflow.transforms` (`from xdflow.transforms import CropTimeTransform`);
+  optional dependencies load only when their transform is used.
+- `SplitterValidator` runs xdflow cross-validation over any scikit-learn splitter or explicit index pairs;
+  `CrossValidator.split_trials_` records each fold's training and validation trials.
+- Examples: `examples/evaluate_existing_model.py` and `examples/moabb_evaluation.py`.
+
+### Changed
+
+- New checks that raise instead of computing something else:
+  - Predictors refuse new data whose dims differ from those seen at fit, or that lacks the labels of a fitted dim
+    (a transposed or reordered layout is realigned). Labels must match exactly, so float labels rebuilt with
+    rounding differences need the fitted labels assigned back.
+  - `metadata=` or a `y`/`groups` Series indexed by the data's trial labels in another order is refused (rows
+    otherwise match trials by position, as in scikit-learn).
+  - Metadata columns whose names collide as text (`1` and `"1"`) are refused.
+  - Validators refuse a `scoring` that is not a name, a callable or None (it silently fell back to the default
+    metric).
+  - `evaluate` refuses a DataFrame `X` with non-numeric columns, scikit-learn metric functions that need scores
+    (`roc_auc_score`, `log_loss`), and trial coordinates named `fold`, `y_true` or `y_pred`.
+  - `EnsemblePredictor(weighting_strategy="score_based")` refuses to fit without `calibration_container`. It scored
+    members on their own training data, which gives members that memorise the largest weights.
+  - Multilabel `predict_proba` refuses a target with more than two classes, or one trained on a single class other
+    than 0 or 1 (its positive class is unknown). A target trained only on 0 (or only on 1) gives probability 0
+    (or 1); it gave the probability of the class it saw.
+- `GroupedKFoldValidator` and `SampledDomainKFoldValidator` keep windows cut from one trial (`orig_trial`) on one
+  side of every split and of the holdout, as `KFoldValidator` already did. Trial numbers are taken per subject and
+  session; stratification is turned off, with a warning, when labels vary among a trial's windows; and windows of
+  one trial in both a source and a target domain (or, with `test_groups`, in groups on both sides of the
+  holdout) are refused, since they would put the trial on both sides.
+- The Tuner works on copies of the pipelines and validator it is given, so seeding and tuning no longer change them.
+- Band-pass, multitaper and Hilbert phase transforms warn when `fs` matches neither `attrs["sfreq"]` nor the
+  spacing of the time coordinate (in seconds, ms or µs; without units, any of them unless the spacing is a whole
+  number, as for sample indices).
+- `SKLearnPredictor(fit_on_labels=True)` fits the estimator on the class labels themselves; `evaluate` uses it for
+  scikit-learn models.
+- Validators no longer cache fitted fold pipelines on disk by default (`use_stateful_fit_cache=False`): a
+  reused fit of an estimator without `random_state` repeated one random draw, so a seed study showed no
+  variance. Steps that learn nothing still run once per cross-validation run, and the Tuner still reuses
+  their outputs across trials. Pass `use_stateful_fit_cache=True` (or `evaluate(cache=True)`) to reuse fits.
+- Results that depend on functions from your own code (`@step` functions, lambdas, `FunctionTransform`) are no
+  longer reused from the disk cache, which could return stale results after a change in code the cache key did
+  not cover (e.g. a helper in another module). Set `XDFLOW_CACHE_USER_CODE=1` to cache them; their keys now
+  include the helpers, constants and modules they read. Cache keys also hash dict, pandas, xarray and random
+  generator parameters by content, and include the installed packages and xdflow's own source, so upgrading or
+  reinstalling a package invalidates cached results.
+
+### Fixed
+
+- Fitted classifiers predict on data without a label coordinate (new, unlabeled recordings).
+- Cross-validation and `Pipeline(use_cache=True)` no longer fail when a fold pipeline or a cached result cannot
+  be pickled (for example a lambda step); that part runs uncached, with a warning.
+- The Tuner no longer prints its pipeline template on every trial.
+
 ## [0.3.0] - 2026-10-10
 
 - Prepared initial open-source release.

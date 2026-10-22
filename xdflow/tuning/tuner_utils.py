@@ -371,12 +371,14 @@ def run_tuning_pipeline(
             if final_predictor is None:
                 raise ValueError("No predictive_transform found on the pipeline; cannot score cross-validation.")
             is_classification = final_predictor.is_classifier
-            metric_name = cv_for_seed.metric_name_
+            # The Tuner's own validator: it carries the overrides and seeds the Tuner applied to its copy.
+            validator = copy.deepcopy(tuner.cv_strategy)
+            if hasattr(validator, "set_pipeline"):  # metric_name_ needs the pipeline's predictor
+                validator.set_pipeline(best_pipeline)
+            metric_name = validator.metric_name_
 
             needs_cv_eval = is_classification and (plot_each_seed_conf_matrix or plot_combined_conf_matrix)
             if needs_cv_eval:
-                validator = copy.deepcopy(cv_for_seed)
-                validator.set_pipeline(best_pipeline)
                 cv_score = validator.cross_validate(initial_data_container, verbose=validator.verbose)
                 cv_trues = np.concatenate(validator.true_labels_) if validator.true_labels_ else np.array([])
                 conf_matrix = validator.oof_confusion_matrix_normalized_

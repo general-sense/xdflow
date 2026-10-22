@@ -189,7 +189,7 @@ class EnsemblePredictor(CompositeTransform, Predictor):
         normalize_weights: Whether to normalize weights to sum to 1
         normalize_outputs: Whether to normalize final ensemble outputs
         n_jobs: Number of parallel jobs for execution
-        calibration_container: Optional container for score-based weighting calibration
+        calibration_container: Held-out data that score-based weighting scores members on (required for it)
     """
 
     def __init__(
@@ -226,7 +226,7 @@ class EnsemblePredictor(CompositeTransform, Predictor):
             normalize_weights: Whether to normalize weights to sum to 1
             normalize_outputs: Whether to normalize final outputs
             n_jobs: Number of parallel jobs to use
-            calibration_container: Data for score-based weight calibration
+            calibration_container: Held-out data for score-based weighting (required for it)
             proba: Whether to return probabilities by default
             sel: Optional selection to apply before predicting
             drop_sel: Optional drop selection to apply before predicting
@@ -468,6 +468,7 @@ class EnsemblePredictor(CompositeTransform, Predictor):
             try:
                 # Get predictions from this member's transform
                 predictions = _as_predictive_transform(member.transform).predict(calibration_container, **kwargs)
+                (predictions,) = self._in_input_order([predictions], calibration_container)  # members may reorder
                 pred_values = predictions.data.values
 
                 # Ensure both target and prediction data are compatible for scoring
@@ -505,6 +506,11 @@ class EnsemblePredictor(CompositeTransform, Predictor):
             container: Possibly encoded DataContainer produced by Predictor.fit
             **kwargs: Additional context/parameters passed through
         """
+        if self.weighting_strategy == "score_based" and self.calibration_container is None:
+            # scored on their own training data, members that memorise would get the largest weights
+            raise ValueError(
+                "weighting_strategy='score_based' needs calibration_container=: held-out data to score members on."
+            )
         original_container = container
         if self.is_classifier and f"{self.target_coord}_orig" in container.data.coords:
             original_da = self._reset_target_coord(container.data)
@@ -531,9 +537,8 @@ class EnsemblePredictor(CompositeTransform, Predictor):
 
         self._ensure_shared_encoders()
 
-        calibration_data = self.calibration_container or original_container
         if self.weighting_strategy == "score_based":
-            self._compute_weights(calibration_data, **kwargs)
+            self._compute_weights(self.calibration_container, **kwargs)
 
         return self
 
@@ -571,7 +576,7 @@ class EnsemblePredictor(CompositeTransform, Predictor):
                 )
                 for member in self.members
             ]
-            return Parallel(n_jobs=self.n_jobs)(tasks)
+            return self._in_input_order(Parallel(n_jobs=self.n_jobs)(tasks), original_container)
 
         outputs: list[DataContainer] = []
         for member in self.members:
@@ -584,7 +589,19 @@ class EnsemblePredictor(CompositeTransform, Predictor):
                     kwargs=dict(kwargs),
                 )
             )
-        return outputs
+        return self._in_input_order(outputs, original_container)
+
+    def _in_input_order(self, outputs: list[DataContainer], container: DataContainer) -> list[DataContainer]:
+        """Member outputs in the input's trial order: members are aggregated by position, and a member pipeline may
+        reorder trials."""
+        trials = container.data[self.sample_dim].values
+        return [
+            DataContainer(output.data.sel({self.sample_dim: trials}))
+            if self.sample_dim in output.data.indexes
+            and not np.array_equal(output.data[self.sample_dim].values, trials)
+            else output
+            for output in outputs
+        ]
 
     def predict(self, container: DataContainer, **kwargs) -> DataContainer:
         """
@@ -604,7 +621,7 @@ class EnsemblePredictor(CompositeTransform, Predictor):
         if self.is_classifier:
             if self.encoder is None or not hasattr(self.encoder, "classes_"):
                 raise ValueError(f"{self.__class__.__name__} requires a fitted encoder before calling predict.")
-            encoded_da = self._encode_target_coord(container.data)
+            encoded_da = self._encode_target_coord(container.data, missing_ok=True)
             encoded_container = DataContainer(encoded_da)
         else:
             encoded_container = container
@@ -684,7 +701,7 @@ class EnsemblePredictor(CompositeTransform, Predictor):
         # Encode target coordinate
         if self.encoder is None or not hasattr(self.encoder, "classes_"):
             raise ValueError(f"{self.__class__.__name__} requires a fitted encoder before calling predict_proba.")
-        encoded_da = self._encode_target_coord(container.data)
+        encoded_da = self._encode_target_coord(container.data, missing_ok=True)
         encoded_container = DataContainer(encoded_da)
 
         # Delegate to encoded entry point for ensemble logic
@@ -726,7 +743,7 @@ class EnsemblePredictor(CompositeTransform, Predictor):
                 f"{self.__class__.__name__} requires a fitted encoder before calling "
                 "predict_proba_with_uncertainty_components."
             )
-        encoded_da = self._encode_target_coord(container.data)
+        encoded_da = self._encode_target_coord(container.data, missing_ok=True)
         encoded_container = DataContainer(encoded_da)
 
         # Collect per-member probability predictions (aligned via shared encoder)
@@ -834,7 +851,7 @@ class EnsemblePredictor(CompositeTransform, Predictor):
         # Encode target coordinate
         if self.encoder is None or not hasattr(self.encoder, "classes_"):
             raise ValueError(f"{self.__class__.__name__} requires a fitted encoder before calling predict_proba.")
-        encoded_da = self._encode_target_coord(container.data)
+        encoded_da = self._encode_target_coord(container.data, missing_ok=True)
         encoded_container = DataContainer(encoded_da)
 
         # Collect per-member probability predictions (aligned via shared encoder)

@@ -5,6 +5,7 @@ This module provides functions for caching and retrieving preprocessed and featu
 based on input parameters. It uses a hash of the input parameters to create unique cache keys.
 """
 
+import enum
 import functools
 import hashlib
 import inspect
@@ -12,8 +13,12 @@ import json
 import os
 import pickle
 import shutil
+import sys
+import sysconfig
 import threading
 import time
+import uuid
+import warnings
 from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
@@ -22,6 +27,7 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
+import xarray as xr
 
 from xdflow.core.data_container import DataContainer
 
@@ -128,6 +134,10 @@ def save_cached_object(prefix: str, key_dict: dict[str, Any], obj: Any) -> None:
     except PermissionError:
         # Skip caching if filesystem forbids writing (e.g., immutable files/attrs)
         return
+    except (pickle.PicklingError, AttributeError, TypeError) as exc:
+        # Not picklable (a lambda or a function defined inside another function): run without the cache.
+        cache_path.unlink(missing_ok=True)
+        warnings.warn(f"Not caching a '{prefix}' result: it cannot be pickled ({exc}).", UserWarning, stacklevel=2)
 
 
 def get_pipeline_cache_key_dict(func: Callable, instance: Any, *args, **kwargs) -> dict[str, Any]:
@@ -212,6 +222,9 @@ def cache_result(
 
             # Verbosity does not change results, so it must not change the key
             key_kwargs = {k: v for k, v in kwargs.items() if k != "verbose"}
+            user_code = _is_user_code(func) or references_user_code(*args, *key_kwargs.values())
+            if user_code and not cache_user_code():
+                return func(*args, **kwargs)  # depends on user code, which a key cannot fully cover
             if key_gen_func and instance:
                 key_dict = key_gen_func(func, *args, **key_kwargs)
             else:
@@ -226,6 +239,7 @@ def cache_result(
                     key_dict["config"] = _get_object_params(instance)
                     key_dict["module_hash"] = _get_module_hash_from_obj(instance)
 
+            key_dict["installed_packages"] = _installed_code_fingerprint()
             cache_key = hash_dict(key_dict)
             cache_path = _get_cache_dir(prefix) / f"{cache_key}.pkl"
 
@@ -250,6 +264,12 @@ def cache_result(
             except PermissionError:
                 # Skip caching if filesystem forbids writing (e.g., immutable files/attrs)
                 pass
+            except (pickle.PicklingError, AttributeError, TypeError) as exc:
+                # Not picklable (e.g. a lambda recorded in the data history): return the result uncached.
+                cache_path.unlink(missing_ok=True)
+                warnings.warn(
+                    f"Not caching a '{prefix}' result: it cannot be pickled ({exc}).", UserWarning, stacklevel=2
+                )
 
             return result
 
@@ -269,34 +289,82 @@ def _get_datacontainer_metadata(dc: DataContainer) -> dict[str, Any]:
     Hashing everything (not a sample) is what keeps a cache from returning results computed on
     different data or labels.
     """
+    return _get_dataarray_metadata(dc.data)
+
+
+def _get_dataarray_metadata(data: xr.DataArray) -> dict[str, Any]:
+    """Build a deterministic signature for a DataArray from its full values, coordinates, attrs and name."""
     return {
-        "shape": tuple(dc.shape),
-        "dims": tuple(dc.dims),
-        "data": _get_ndarray_metadata(np.asarray(dc.data.values)),
+        "shape": tuple(data.shape),
+        "dims": tuple(data.dims),
+        "data": _get_ndarray_metadata(np.asarray(data.values)),
+        "name": str(data.name),
         "coord_metadata": {
-            str(name): {"dims": tuple(coord.dims), **_get_ndarray_metadata(np.asarray(coord.values))}
-            for name, coord in dc.data.coords.items()
+            str(name): {
+                "dims": tuple(coord.dims),
+                **_get_ndarray_metadata(np.asarray(coord.values)),
+                "attrs": _get_object_metadata(dict(coord.attrs)),  # e.g. units, which steps may read
+            }
+            for name, coord in data.coords.items()
         },
         # Transforms may read settings from attrs (e.g. a sampling rate). `data_history` only records the
         # steps already applied, which the step configuration in the key covers.
-        "attrs": _get_object_metadata({str(k): v for k, v in dc.data.attrs.items() if k != "data_history"}),
+        "attrs": _get_object_metadata({str(k): v for k, v in data.attrs.items() if k != "data_history"}),
     }
+
+
+def _bit_generator(rng: Any) -> Any:
+    return rng.bit_generator if isinstance(rng, np.random.Generator) else rng
+
+
+_XDFLOW_DIR = Path(__file__).resolve().parents[1]
+
+
+@functools.lru_cache(maxsize=1)
+def _installed_code_fingerprint() -> str:
+    """Installed distributions on sys.path, by metadata directory and the size and time of their RECORD, and the
+    source of xdflow itself, so that installing, upgrading or reinstalling a library (a dependency or your own
+    package), or editing xdflow in a checkout, changes every cache key. Read once per process: restart after
+    installing or editing."""
+    entries = [
+        f"xdflow/{path.relative_to(_XDFLOW_DIR)}:{hashlib.md5(path.read_bytes()).hexdigest()}"
+        for path in sorted(_XDFLOW_DIR.rglob("*.py"))
+    ]
+    for entry in sys.path:
+        if not os.path.isdir(entry):
+            continue
+        with os.scandir(entry) as items:
+            for item in items:
+                if item.name.endswith((".dist-info", ".egg-info")):
+                    record = os.path.join(item.path, "RECORD")
+                    stat = os.stat(record if os.path.exists(record) else item.path)
+                    entries.append(f"{entry}/{item.name}:{stat.st_size}:{stat.st_mtime_ns}")
+    return hashlib.md5("\n".join(sorted(entries)).encode()).hexdigest()
+
+
+def _content_hash(obj: Any) -> str:
+    """joblib's content hash; for contents it cannot hash (e.g. lambdas in a column), a key that never repeats.
+    shortcut: every call then writes a new cache entry, bounded by the cache size limit."""
+    try:
+        return joblib.hash(obj)
+    except Exception:
+        return uuid.uuid4().hex
 
 
 def _get_dataframe_metadata(df: pd.DataFrame) -> dict[str, Any]:
     """Build a deterministic signature for a pandas DataFrame from its full contents."""
-    return {"shape": tuple(df.shape), "columns": tuple(str(c) for c in df.columns), "hash": joblib.hash(df)}
+    return {"shape": tuple(df.shape), "columns": tuple(str(c) for c in df.columns), "hash": _content_hash(df)}
 
 
 def _get_series_metadata(s: pd.Series) -> dict[str, Any]:
     """Build a deterministic signature for a pandas Series from its full contents."""
-    return {"length": int(s.shape[0]), "name": str(s.name), "hash": joblib.hash(s)}
+    return {"length": int(s.shape[0]), "name": str(s.name), "hash": _content_hash(s)}
 
 
 def _get_dict_metadata(d: dict[Any, Any]) -> dict[str, Any]:
-    """Build a deterministic signature for a dictionary."""
-    keys_sorted = sorted(d.keys(), key=lambda x: str(x))
-    return {"length": len(d), "items": tuple((str(k), _get_object_metadata(d[k])) for k in keys_sorted)}
+    """Build a deterministic signature for a dictionary: keys with their types, in insertion order (code may
+    iterate over it)."""
+    return {"length": len(d), "items": tuple((type(k).__name__, str(k), _get_object_metadata(v)) for k, v in d.items())}
 
 
 def _get_sequence_metadata(seq: Any) -> dict[str, Any]:
@@ -334,6 +402,64 @@ def _is_plain_callable(obj: Any) -> bool:
 _callables_in_progress = threading.local()
 
 
+def cache_user_code() -> bool:
+    """Whether results that depend on user code may be cached on disk (``XDFLOW_CACHE_USER_CODE=1``).
+
+    Off by default: a key covers a function's code, parameters, the globals it reads and the source of the
+    modules they come from, but not everything it can depend on (attributes of a submodule, methods of a class,
+    values changed at runtime, eval). Turn it on when your functions depend only on those, and restart after
+    editing their modules.
+    """
+    return os.environ.get("XDFLOW_CACHE_USER_CODE", "").strip().lower() in {"1", "true", "yes"}
+
+
+def references_user_code(*objects: Any) -> bool:
+    """Whether the objects involve code from user modules: functions, classes or callables written by the user,
+    wherever they sit (parameters, wrapped estimators, scorers, partials, object arrays, data attrs).
+
+    The objects are walked by pickling them, which reaches everything they hold; each object reached is checked by
+    its own class (or itself, for functions and classes), so a custom reduction cannot hide it. Objects that cannot
+    be pickled (lambdas, local functions) count as user code. For data, only attrs are checked, not
+    ``data_history``, which records the steps already applied (the data values hold their results).
+    shortcut: user code reached only through a library registry (e.g. an xarray accessor called by name) is not seen.
+    """
+    carriers = [
+        {k: v for k, v in obj.data.attrs.items() if k != "data_history"} if isinstance(obj, DataContainer) else obj
+        for obj in objects
+    ]
+    finder = _UserCodeFinder(_Discard(), protocol=pickle.HIGHEST_PROTOCOL)
+    try:
+        finder.dump(carriers)
+    except _UserCodeFoundError:
+        return True
+    except Exception:
+        return True
+    return False
+
+
+class _UserCodeFoundError(Exception):
+    pass
+
+
+class _Discard:
+    def write(self, data: bytes) -> int:
+        return len(data)
+
+
+class _UserCodeFinder(pickle.Pickler):
+    """Pickles to nowhere, stopping at the first object from user code."""
+
+    def reducer_override(self, obj: Any) -> Any:
+        if type(obj) is np.ndarray and not obj.dtype.hasobject:
+            return int, ()  # numbers carry no code: skip serializing them
+        code = obj if inspect.isclass(obj) or inspect.isroutine(obj) else type(obj)
+        # Wrappers (functools.wraps, numba's vectorize) may hide the wrapped function inside their own reduction.
+        wrapped = [getattr(obj, name, None) for name in ("__wrapped__", "py_func")]
+        if any(candidate is not None and _is_user_code(candidate) for candidate in [code, *wrapped]):
+            raise _UserCodeFoundError
+        return NotImplemented
+
+
 def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
     """Build a deterministic signature for a callable."""
     qualname = getattr(fn, "__qualname__", getattr(fn, "__name__", type(fn).__qualname__))
@@ -355,7 +481,6 @@ def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
         code = getattr(fn, "__code__", None)
         if code is not None:
             # Lambdas and closures share a qualname, so also hash the code, defaults and captured values.
-            # shortcut: module-level globals the function reads are not hashed; edits are covered by module_hash.
             cells = []
             for cell in fn.__closure__ or ():  # type: ignore[attr-defined]
                 try:
@@ -366,6 +491,8 @@ def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
             meta["defaults"] = _get_object_metadata(list(fn.__defaults__ or ()))  # type: ignore[attr-defined]
             meta["kwdefaults"] = _get_object_metadata(dict(fn.__kwdefaults__ or {}))  # type: ignore[attr-defined]
             meta["closure"] = _get_object_metadata(cells)
+            if _is_user_code(fn):
+                meta["globals"] = _referenced_globals_metadata(fn, code)
         elif not isinstance(fn, type):
             # Callable instance (ufunc, operator.methodcaller, object with __call__): hash its pickled state,
             # which covers __slots__ and C-level configuration; fall back to public attributes.
@@ -382,6 +509,60 @@ def _get_callable_metadata(fn: Callable) -> dict[str, Any]:
         return meta
     finally:
         in_progress.discard(id(fn))
+
+
+# Installed packages, the standard library and xdflow change only with their version; their module hash covers them.
+_LIBRARY_DIRS = tuple(
+    {Path(sysconfig.get_paths()[key]).resolve() for key in ("stdlib", "platstdlib", "purelib", "platlib")}
+    | {Path(__file__).resolve().parents[1]}
+)
+
+
+def _is_user_code(obj: Any) -> bool:
+    """Defined in code users edit: a script, their own modules or a notebook. A function is judged by the file its
+    code comes from, since functools.wraps copies another function's module."""
+    code = getattr(obj, "__code__", None)
+    source = getattr(code, "co_filename", None)
+    if source is None or not os.path.isabs(source):
+        # No code, or code without a file ("<decorator-gen-15>", Cython's "<stringsource>" or relative .pyx names,
+        # notebook cells, exec): judge it by the module that defines it.
+        module = obj if inspect.ismodule(obj) else inspect.getmodule(obj)
+        if module is None:  # exec'd code outside any module is user code; frozen code is the standard library
+            return source is not None and not source.startswith("<frozen")
+        source = getattr(module, "__file__", None)
+        if source is None:  # a notebook's __main__, or a built-in module
+            return module.__name__ == "__main__"
+    path = Path(source).resolve()
+    return not any(path.is_relative_to(directory) for directory in _LIBRARY_DIRS)
+
+
+def _referenced_globals_metadata(fn: Callable, code: Any) -> dict[str, Any]:
+    """Globals a function reads: helper functions (recursively), constants, and other modules by source, so that
+    editing them changes the key. module_hash alone misses other modules and notebook cells (no source file).
+    shortcut: classes are keyed by their module's source, so a class redefined in a notebook is not seen."""
+    names: set[str] = set()
+    codes = [code]
+    while codes:  # nested functions and comprehensions read globals too
+        current = codes.pop()
+        names.update(current.co_names)
+        codes.extend(const for const in current.co_consts if inspect.iscode(const))
+    namespace = getattr(fn, "__globals__", {})
+    meta: dict[str, Any] = {}
+    for name in sorted(names & namespace.keys()):
+        value = namespace[name]
+        try:
+            if inspect.ismodule(value):
+                source = getattr(value, "__file__", None)
+                user_module = source is not None and _is_user_code(value)
+                meta[name] = hashlib.md5(Path(source).read_bytes()).hexdigest() if user_module else value.__name__
+            elif isinstance(value, type):
+                meta[name] = {"class": value.__qualname__, "module_hash": _get_module_hash_from_obj(value)}
+            else:
+                meta[name] = _get_object_metadata(value)
+        except Exception:  # cannot fingerprint it (e.g. a cyclic container): never reuse this key
+            # shortcut: every call writes a new cache entry, bounded by the cache size limit
+            meta[name] = uuid.uuid4().hex
+    return meta
 
 
 def _get_object_with_dict_metadata(obj: Any) -> dict[str, Any]:
@@ -406,8 +587,18 @@ def _get_object_metadata(obj: Any) -> Any:
     """
     if isinstance(obj, (int, float, str, bool, type(None))):
         return obj
+    if isinstance(obj, np.ma.MaskedArray):
+        return {
+            "data": _get_ndarray_metadata(np.ma.getdata(obj)),
+            "mask": _get_ndarray_metadata(np.ma.getmaskarray(obj)),
+            "fill_value": _get_object_metadata(np.asarray(obj.fill_value).tolist()),
+        }
     if isinstance(obj, np.ndarray):
         return _get_ndarray_metadata(obj)
+    if isinstance(obj, xr.DataArray):
+        return _get_dataarray_metadata(obj)
+    if isinstance(obj, _PANDAS_VALUES):  # their values live in private attributes
+        return {"pandas": type(obj).__name__, "hash": _content_hash(obj)}
     if isinstance(obj, DataContainer):
         return _get_datacontainer_metadata(obj)
     if isinstance(obj, pd.DataFrame):
@@ -418,13 +609,32 @@ def _get_object_metadata(obj: Any) -> Any:
         return _get_dict_metadata(obj)
     if isinstance(obj, (list, tuple)):
         return _get_sequence_metadata(obj)
-    if isinstance(obj, set):
+    if isinstance(obj, (set, frozenset)):
         return _get_set_metadata(obj)
+    if isinstance(obj, (np.random.Generator, np.random.BitGenerator)):  # their text is the same for every seed
+        return {"rng": type(obj).__name__, "state": _get_object_metadata(_bit_generator(obj).state)}
+    if isinstance(obj, np.random.RandomState):
+        return {"rng": "RandomState", "state": _get_object_metadata(list(obj.get_state()))}
+    if isinstance(obj, enum.Enum):  # members keep their identity in private attributes
+        return {"enum": f"{type(obj).__module__}.{type(obj).__qualname__}.{obj.name}"}
     if callable(obj):
         return _get_callable_metadata(obj)
     if hasattr(obj, "__dict__"):
         return _get_object_with_dict_metadata(obj)
-    return {"__class__": obj.__class__.__name__, "repr": str(obj)[:128]}
+    return {"__class__": obj.__class__.__name__, "repr": str(obj)}
+
+
+_PANDAS_VALUES = (
+    pd.Index,
+    pd.api.extensions.ExtensionArray,  # string, Int64, boolean... arrays (pandas 3's default strings too)
+    pd.Timestamp,
+    pd.Timedelta,
+    pd.Period,
+    pd.Interval,
+    pd.DateOffset,
+)
+# Parameter values keyed by content, although they have a __dict__ (which holds no values for these).
+_BY_CONTENT = (enum.Enum, np.random.Generator, np.random.BitGenerator, np.random.RandomState, *_PANDAS_VALUES)
 
 
 def _get_object_params(obj: Any) -> Any:
@@ -442,11 +652,13 @@ def _get_object_params(obj: Any) -> Any:
 
     if _is_plain_callable(obj):
         return _get_callable_metadata(obj)
+    if isinstance(obj, (np.ndarray, pd.DataFrame, pd.Series, xr.DataArray, *_BY_CONTENT)):
+        return _get_object_metadata(obj)  # values, not attributes (some keep a __dict__ without their values)
 
     if not hasattr(obj, "__dict__"):
         if isinstance(obj, (list, tuple)):
             return [_get_object_params(item) for item in obj]
-        return str(obj)
+        return _get_object_metadata(obj)
 
     params = {}
     # Get class name for type identification
@@ -466,6 +678,8 @@ def _get_object_params(obj: Any) -> Any:
             continue
         if _is_plain_callable(value):
             params[key] = _get_callable_metadata(value)
+        elif isinstance(value, (np.ma.MaskedArray, pd.DataFrame, pd.Series, xr.DataArray, *_BY_CONTENT)):
+            params[key] = _get_object_metadata(value)
         elif hasattr(value, "__dict__"):
             # Recursively get parameters of nested objects
             params[key] = _get_object_params(value)
@@ -474,7 +688,7 @@ def _get_object_params(obj: Any) -> Any:
         elif isinstance(value, np.ndarray):
             params[key] = joblib.hash(value)  # str() truncates large arrays
         else:
-            params[key] = str(value)
+            params[key] = _get_object_metadata(value)  # by content: str() truncates arrays inside dicts
 
     return params
 

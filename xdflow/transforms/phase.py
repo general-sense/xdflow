@@ -13,7 +13,7 @@ from scipy.signal import hilbert
 
 from xdflow.core.base import Transform
 from xdflow.core.data_container import DataContainer
-from xdflow.utils.spectral import bandpass_filter, get_remove_freq_ranges
+from xdflow.utils.spectral import bandpass_filter, check_sampling_rate, get_remove_freq_ranges
 
 
 class HilbertPhaseTransform(Transform):
@@ -310,6 +310,7 @@ class HilbertPhaseTransform(Transform):
 
     def _transform(self, container: DataContainer, **kwargs: Any) -> DataContainer:
         data = container.data
+        check_sampling_rate(data, self.fs, type(self).__name__)
         if not np.issubdtype(data.dtype, np.floating):
             # Phases are floats; outputs are cast to the input dtype below, which would truncate integers
             data = data.astype(np.float64)

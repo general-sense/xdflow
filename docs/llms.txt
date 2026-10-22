@@ -5,6 +5,7 @@ XDFlow is a metadata-driven ML pipeline framework for labeled structured data st
 Important docs for LLMs and coding agents:
 
 - Overview: /index/
+- Evaluate an existing model (evaluate, check_split, to_sklearn): /tutorials/evaluate/
 - Data contract: /concepts/data_contract/
 - Composing pipelines: /concepts/composition/
 - Tuning: /concepts/tuning/
@@ -23,3 +24,6 @@ Important docs for LLMs and coding agents:
 
 Repository-level coding-agent instructions live in AGENTS.md.
 Runnable quickstart script: examples/quickstart.py.
+One-call entry points: xdflow.evaluate(model, X, y, groups=...), xdflow.check_split(X, cv, y=..., metadata=...),
+xdflow.make_pipeline(*steps), @xdflow.step for plain-function steps (fit=... for steps that learn), xdflow.from_numpy,
+xdflow.to_sklearn(pipeline, dims, coords).

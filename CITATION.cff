@@ -15,8 +15,8 @@ authors:
 repository-code: "https://github.com/general-sense/xdflow"
 url: "https://xdflow.readthedocs.io"
 license: MIT
-version: "0.3.0"
-date-released: "2026-10-10"
+version: "0.4.0"
+date-released: "2026-10-21"
 keywords:
   - machine learning
   - xarray

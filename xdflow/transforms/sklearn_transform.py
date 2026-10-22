@@ -159,6 +159,7 @@ class SKLearnTransform(Transform, SampleWeightMixin):
         self._fit_labels = {
             dim: data.indexes[dim] for dim in data.dims if dim != self.sample_dim and dim in data.indexes
         }
+        self._fit_dims = data.dims
 
     def _align_to_fit(self, data: xr.DataArray) -> xr.DataArray:
         """Order every non-sample dimension as it was at fit.
@@ -166,14 +167,31 @@ class SKLearnTransform(Transform, SampleWeightMixin):
         The estimator sees values by position, so input whose features or channels arrive in another order
         would otherwise be silently mis-assigned. Labels missing from the new data raise.
         """
+        fit_dims = getattr(self, "_fit_dims", None)  # absent in models pickled before dim order was recorded
+        if fit_dims is not None:
+            extra = [dim for dim in data.dims if dim not in fit_dims and data.sizes[dim] == 1]
+            data = data.squeeze(extra, drop=True) if extra else data  # a size-1 dim absent at fit holds nothing
+            if set(data.dims) != set(fit_dims):
+                raise ValueError(
+                    f"{type(self).__name__} was fitted on dims {fit_dims}; this data has dims {data.dims}."
+                )
+            if data.dims != fit_dims:
+                data = data.transpose(*fit_dims)  # N-D estimators read axes by position, like features
         for dim, fitted in getattr(self, "_fit_labels", {}).items():
-            if dim not in data.indexes or data.indexes[dim].equals(fitted):
+            if dim not in data.indexes:
+                if dim in data.dims:  # labels seen at fit, none now: positions cannot be checked
+                    raise ValueError(
+                        f"{type(self).__name__} was fitted with '{dim}' labels, but this data has none for '{dim}'."
+                    )
+                continue
+            if data.indexes[dim].equals(fitted):
                 continue
             positions = data.indexes[dim].get_indexer(fitted)
-            if (positions < 0).any():
+            if (positions < 0).any():  # matched exactly: float labels rebuilt elsewhere must be assigned back
                 missing = list(fitted[positions < 0][:5])
                 raise ValueError(
-                    f"{type(self).__name__} was fitted with '{dim}' labels missing from this data: {missing}"
+                    f"{type(self).__name__} was fitted with '{dim}' labels missing from this data: {missing}. "
+                    f"If they differ only by rounding, assign the fitted labels: data.assign_coords({dim}=...)."
                 )
             data = data.isel({dim: positions})
         return data
@@ -189,7 +207,7 @@ class SKLearnTransform(Transform, SampleWeightMixin):
             # Resolve target coordinates (handles patterns, lists, and single coords)
             resolved_targets = self._resolve_target_coords(data)
             self._resolved_target_coords = resolved_targets
-            y = extract_target_array(resolved_targets, data, validate=False)
+            y = self._estimator_target(extract_target_array(resolved_targets, data, validate=False))
 
             self._wrap_for_resolved_targets(resolved_targets)
 
@@ -216,6 +234,10 @@ class SKLearnTransform(Transform, SampleWeightMixin):
             else:
                 self.estimator.fit(X, **fit_kwargs)
         return self
+
+    def _estimator_target(self, y: Any) -> Any:
+        """The target as the estimator receives it."""
+        return y
 
     def _clone_estimator_cls(self) -> Any:
         """The estimator class ``clone()`` rebuilds from (the unwrapped class after automatic multi-output wrapping)."""
@@ -465,6 +487,7 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
         sel: dict[str, Any] | None = None,
         drop_sel: dict[str, Any] | None = None,
         sample_weight_coord: str | None = "sample_weight",
+        fit_on_labels: bool = False,
         **kwargs: Any,
     ):
         """Initialize a predictor wrapper.
@@ -485,6 +508,9 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
             sel: Label selection applied before fitting or transforming.
             drop_sel: Label selection dropped before fitting or transforming.
             sample_weight_coord: Coordinate containing optional sample weights.
+            fit_on_labels: For single-label classifiers, fit the estimator on the class labels themselves instead
+                of their codes 0, 1, 2..., so parameters that name classes (``class_weight``, ``pos_label`` in a
+                nested scorer) mean what they mean in scikit-learn.
             **kwargs: Estimator constructor arguments plus parent-class options.
         """
         parent_param_names = collect_super_init_param_names(type(self), SKLearnTransform)
@@ -569,6 +595,7 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
             sample_weight_coord=sample_weight_coord,
             **kwargs,
         )
+        self.fit_on_labels = fit_on_labels
 
     # _transform implemented by Predictor
 
@@ -606,7 +633,8 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
         if not hasattr(self.estimator, "predict"):
             raise AttributeError(f"Estimator '{self.estimator.__class__.__name__}' has no method 'predict'.")
         X, _ = self._prepare_data(self._align_to_fit(data))
-        return self.estimator.predict(X)
+        predictions = self.estimator.predict(X)
+        return self._to_codes(predictions) if self._fits_on_labels() else predictions
 
     def _predict_proba(self, data: xr.DataArray, **kwargs) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -625,12 +653,55 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
 
         if self.is_multilabel:
             if isinstance(raw_probabilities, list):
-                probabilities = np.column_stack([p[:, 1] if p.shape[1] == 2 else p[:, -1] for p in raw_probabilities])
+                # Each target's probability of 1, found by its classes (a target trained on 0 alone has one column,
+                # for 0). Multi-output estimators, native or wrapped, list one classes_ array per target.
+                classes = getattr(self.estimator, "classes_", None)
+                if not isinstance(
+                    classes, list
+                ):  # e.g. per-target estimators fitted one by one (LightGBM early stopping)
+                    classes = [getattr(est, "classes_", None) for est in getattr(self.estimator, "estimators_", [])]
+                complete = len(classes) == len(raw_probabilities) and all(c is not None for c in classes)
+                per_target = classes if complete else None
+                probabilities = np.column_stack(
+                    [
+                        _positive_class_probability(p, per_target[i] if per_target is not None else None)
+                        for i, p in enumerate(raw_probabilities)
+                    ]
+                )
             else:
                 probabilities = raw_probabilities
             return probabilities, np.arange(probabilities.shape[1])
 
-        return raw_probabilities, self.estimator.classes_
+        classes = self.estimator.classes_
+        return raw_probabilities, (self._to_codes(classes) if self._fits_on_labels() else classes)
+
+    def _to_codes(self, labels: Any) -> np.ndarray:
+        """Codes of labels the estimator returned, matched exactly: LabelEncoder casts to the labels' dtype first,
+        which can turn an unknown label ("apple_extra", -1) into a known one."""
+        labels = np.ravel(np.asarray(labels))  # some estimators predict a column vector
+        classes = self.encoder.classes_
+        try:  # the training labels' dtype (XGBoost predicts 0/1 for bool labels), but only where values survive it
+            cast = labels.astype(classes.dtype)
+            # both ways: comparing int64 with float64 rounds the integer, so 2**53 + 1 would equal 2.0**53
+            same = np.asarray((cast == labels) & (cast.astype(labels.dtype) == labels), dtype=bool)
+        except (TypeError, ValueError):
+            cast, same = labels, np.ones(labels.shape, dtype=bool)
+        codes = np.where(same, pd.Index(classes).get_indexer(cast), -1)
+        if (codes < 0).any():
+            unknown = sorted({str(label) for label in labels[codes < 0]})[:5]
+            raise ValueError(f"The estimator returned labels not among the training labels: {unknown}.")
+        return codes
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        state.setdefault("fit_on_labels", False)  # predictors saved before the parameter existed
+        self.__dict__.update(state)
+
+    def _fits_on_labels(self) -> bool:
+        return bool(getattr(self, "fit_on_labels", False)) and self.is_classifier and not self.is_multilabel
+
+    def _estimator_target(self, y: Any) -> Any:
+        # Codes back to the labels the estimator should see (Predictor.fit encoded them).
+        return self.encoder.inverse_transform(np.ravel(y)) if self._fits_on_labels() else y
 
     def get_expected_output_dims(self, input_dims: tuple[str, ...]) -> tuple[str, ...]:
         """
@@ -646,3 +717,20 @@ class SKLearnPredictor(SKLearnTransform, Predictor):
             return (self.sample_dim, "target")
         else:
             return (self.sample_dim, "prediction")
+
+
+def _positive_class_probability(probabilities: np.ndarray, classes: Any) -> np.ndarray:
+    """One binary target's probability of its larger class (1 for 0/1 targets), from its predict_proba columns,
+    which follow its classes. A target seen with one class alone gives 1 or 0 if that class is 1 or 0 (some
+    estimators still return two columns), and is unknown otherwise."""
+    if classes is None:
+        return probabilities[:, -1]
+    classes = np.asarray(classes)
+    if classes.size == 2:
+        return probabilities[:, -1]
+    if classes.size == 1:
+        (seen,) = classes
+        if seen in (0, 1):
+            return np.full(len(probabilities), float(seen))
+        raise ValueError(f"A multilabel target was trained on class {seen!r} alone, so its positive class is unknown.")
+    raise ValueError(f"Multilabel targets must be binary; one has classes {classes.tolist()}.")

@@ -29,6 +29,7 @@ from xdflow.composite.base import CompositeTransform
 from xdflow.core.base import Transform
 from xdflow.core.data_container import DataContainer, TransformError
 from xdflow.cv.base import CrossValidator
+from xdflow.cv.splitter import SplitterValidator
 from xdflow.transforms.sklearn_transform import SKLearnTransform
 from xdflow.utils.cache_utils import _get_object_metadata, _get_object_params, hash_dict
 
@@ -107,8 +108,10 @@ class Tuner:
         if isinstance(pipelines_to_tune, Pipeline):
             pipelines_to_tune = [pipelines_to_tune]
 
-        self.pipelines_to_tune = {p.name: p for p in pipelines_to_tune}
-        self.cv_strategy = cv_strategy
+        # Copies: seeding and tuning must not change the pipelines and validator the caller keeps using. Pipelines
+        # are cloned (as each trial is), which also works for steps holding resources that cannot be deep-copied.
+        self.pipelines_to_tune = {p.name: p.clone() for p in pipelines_to_tune}
+        self.cv_strategy = copy.deepcopy(cv_strategy)
         self.param_grid = param_grid
         self.initial_data = initial_data_container
         self.sampler = sampler or TPESampler(seed=random_seed)
@@ -390,7 +393,6 @@ class Tuner:
                 pipeline_template, initial_data = self.prepare_pipeline_with_caching(
                     self.pipelines_to_tune[pipeline_name]
                 )
-                print("pipeline_template", pipeline_template)
             else:
                 pipeline_template = self.pipelines_to_tune[pipeline_name]
                 initial_data = self.initial_data
@@ -420,8 +422,14 @@ class Tuner:
                 if trial.should_prune():
                     raise optuna.TrialPruned(f"Pruned at fold {step_idx} (score {fold_score:.4f})")
 
+            # Split positions refer to the trials as given, not as reordered by the cached prefix.
+            order = (
+                {"input_trials": self.initial_data.data.trial.values}
+                if isinstance(trial_validator, SplitterValidator)
+                else {}
+            )
             score = trial_validator.cross_validate(
-                initial_data, verbose=self.verbose_transforms, pruning_callback=pruning_callback
+                initial_data, verbose=self.verbose_transforms, pruning_callback=pruning_callback, **order
             )
             return score
 
@@ -949,7 +957,8 @@ class Tuner:
             target_transform: Any, param_grid: dict[str, Any], namespace: str, initial_params: dict[str, Any]
         ):
             for param_name, space in param_grid.items():
-                current_value = target_transform.get_params(deep=False).get(param_name)
+                # deep: nested estimator parameters such as "logisticregression__C" of a wrapped sklearn Pipeline
+                current_value = target_transform.get_params(deep=True).get(param_name)
 
                 # If current_value is None, it means the parameter wasn't explicitly initialized.
                 # In this case, skip enqueueing it and let Optuna sample it.

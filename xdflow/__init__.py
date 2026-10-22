@@ -22,6 +22,7 @@ from xdflow.composite import (
     TransformUnion,
     UnionWithInput,
 )
+from xdflow.composite.pipeline import make_pipeline
 from xdflow.core import DataContainer, Predictor, Transform, TransformError
 from xdflow.cv import (
     CrossValidator,
@@ -31,8 +32,14 @@ from xdflow.cv import (
     LeaveGroupOutValidator,
     LeaveSessionOutValidator,
     SampledDomainKFoldValidator,
+    SplitterValidator,
 )
-from xdflow.interop import from_mne_epochs
+from xdflow.diagnostics import check_split
+from xdflow.evaluate import evaluate
+from xdflow.interop import from_mne_epochs, from_numpy
+from xdflow.sklearn_api import to_sklearn
+from xdflow.transforms.function_step import step
+from xdflow.transforms.sklearn_transform import SKLearnPredictor, SKLearnTransformer
 
 # Hyperparameter tuning (optional dependency: optuna)
 try:
@@ -45,12 +52,21 @@ except ModuleNotFoundError as exc:
 
 __all__ = [
     "__version__",
+    # Getting started
+    "evaluate",
+    "check_split",
+    "make_pipeline",
+    "step",
+    "from_numpy",
+    "from_mne_epochs",
+    "to_sklearn",
+    "SKLearnPredictor",
+    "SKLearnTransformer",
     # Core
     "Transform",
     "Predictor",
     "DataContainer",
     "TransformError",
-    "from_mne_epochs",
     # Composite
     "Pipeline",
     "TransformUnion",
@@ -67,6 +83,7 @@ __all__ = [
     "LeaveGroupOutValidator",
     "LeaveSessionOutValidator",
     "LeaveAnimalOutValidator",
+    "SplitterValidator",
     # Tuning
     "Tuner",
     "run_tuning_pipeline",

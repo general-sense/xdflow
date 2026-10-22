@@ -112,3 +112,95 @@ def test_the_tuners_seed_reaches_an_unfitted_group_apply_template():
     Tuner._inject_random_seeds_into_pipelines(SimpleNamespace(pipelines_to_tune={"p": group_apply}, random_seed=123))
 
     assert group_apply.clone().transform_template.estimator.random_state == 123
+
+
+def test_the_first_trial_uses_a_wrapped_scikit_learn_pipelines_own_values():
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import GroupKFold
+    from sklearn.pipeline import make_pipeline as sklearn_make_pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    import xdflow
+    from xdflow import SplitterValidator
+
+    rng = np.random.default_rng(0)
+    data = xdflow.from_numpy(rng.normal(size=(60, 3)), y=np.arange(60) % 2, subject=np.repeat(np.arange(6), 10))
+    model = sklearn_make_pipeline(StandardScaler(), LogisticRegression(C=0.5))
+    result = xdflow.evaluate(model, data, "y", groups="subject", cv=GroupKFold(3))
+    tuner = Tuner(
+        pipelines_to_tune=result.pipeline,
+        cv_strategy=SplitterValidator(GroupKFold(3), group_coord="subject", scoring="accuracy", verbose=False),
+        param_grid={"model": {"pipeline": {"logisticregression__C": ("log", 1e-3, 10.0)}}},
+        initial_data_container=data,
+        verbose=0,
+    )
+    tuner.tune(n_trials=1)
+    assert tuner.study.trials[0].params["model__pipeline__logisticregression__C"] == 0.5
+
+
+def test_the_tuner_leaves_the_objects_it_was_given_unchanged():
+    from sklearn.ensemble import RandomForestClassifier
+
+    import xdflow
+
+    rng = np.random.default_rng(0)
+    data = xdflow.from_numpy(rng.normal(size=(40, 3)), label=np.arange(40) % 2)
+    pipeline = xdflow.make_pipeline(
+        SKLearnPredictor(
+            RandomForestClassifier, sample_dim="trial", target_coord="label", random_state=42, n_estimators=5
+        )
+    )
+    validator = KFoldValidator(n_splits=3, random_state=3, verbose=False)
+    Tuner(pipeline, validator, {pipeline.name: {"randomforestclassifier": {"n_estimators": [5, 6]}}}, data, verbose=0)
+    assert validator.random_state == 3
+    assert pipeline.steps[0].transform.get_params()["random_state"] == 42
+
+
+def test_run_tuning_pipeline_reports_the_score_of_the_tuned_validator(capsys):
+    from sklearn.linear_model import LogisticRegression
+
+    from xdflow import run_tuning_pipeline
+
+    rng = np.random.default_rng(0)
+    event = np.where(rng.random(200) < 0.4, "intertrial", "stim")
+    label = np.where(event == "intertrial", "rest", np.array(["a", "b"])[rng.integers(0, 2, 200)])
+    values = rng.normal(size=(200, 4)) + (label == "a")[:, None] * 1.5
+    data = DataContainer(
+        xr.DataArray(
+            values,
+            dims=("trial", "feature"),
+            coords={"trial": np.arange(200), "label": ("trial", label), "event_type": ("trial", event)},
+        )
+    )
+    pipeline = Pipeline("p", [("lr", SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label"))])
+
+    def validator(**kwargs):
+        return KFoldValidator(n_splits=4, shuffle=True, random_state=0, scoring="accuracy", verbose=False, **kwargs)
+
+    run_tuning_pipeline(
+        pipeline,
+        validator(),
+        {"p": {"lr": {"C": [1.0]}}},
+        data,
+        n_trials=1,
+        score_on_holdout=False,
+        exclude_intertrial_from_scoring=True,
+        return_pipelines=False,
+    )
+    oracle = validator(exclude_intertrial_from_scoring=True)
+    oracle.set_pipeline(pipeline.clone())
+    assert f"{oracle.cross_validate(data):.4f}" in capsys.readouterr().out
+
+
+def test_the_tuner_accepts_steps_that_cannot_be_deep_copied():
+    import threading
+
+    from sklearn.linear_model import LogisticRegression
+
+    import xdflow
+
+    data = xdflow.from_numpy(np.random.default_rng(0).normal(size=(40, 3)), label=np.arange(40) % 2)
+    predictor = SKLearnPredictor(LogisticRegression, sample_dim="trial", target_coord="label")
+    predictor.session = threading.Lock()  # e.g. a runtime handle held by a custom step
+    pipeline = xdflow.make_pipeline(predictor)
+    Tuner(pipeline, KFoldValidator(n_splits=3, verbose=False), {pipeline.name: {}}, data, verbose=0)

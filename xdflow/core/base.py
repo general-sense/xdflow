@@ -475,7 +475,10 @@ class Transform(ABC):
         source_history = list(source_container.data.attrs.get("data_history", []))
         output_history = list(attrs.get("data_history", []))
 
-        if output_history[: len(source_history)] == source_history:
+        # By class name: entries hold parameters (arrays) that compare elementwise, and copies of them after data.copy()
+        if [entry.get("class") for entry in output_history[: len(source_history)]] == [
+            entry.get("class") for entry in source_history
+        ]:
             history = output_history
         else:
             # If output history diverges, treat it as extra output-local provenance after lost source history.
@@ -687,16 +690,20 @@ class Predictor(Transform, ABC):
         self.encoder.fit(data.coords[self.target_coord].values)
         self.set_encoder(self.encoder)
 
-    def _encode_target_coord(self, data: xr.DataArray) -> xr.DataArray:
+    def _encode_target_coord(self, data: xr.DataArray, missing_ok: bool = False) -> xr.DataArray:
         """
         Encodes the target coordinate using the encoder.
 
         Args:
             data: The data to encode the target coordinate on
+            missing_ok: Return the data unchanged when it has no target coordinate (prediction on unlabeled data).
 
         Returns:
             xr.DataArray: The data with the target coordinate encoded. The original values for the target coordinate are kept in a new coordinate.
         """
+        if missing_ok and self.target_coord not in data.coords:
+            return data
+
         if self.encoder is None:
             raise ValueError(
                 f"{self.__class__.__name__} requires a fitted 'encoder' for encoding the target coordinate."
@@ -759,6 +766,8 @@ class Predictor(Transform, ABC):
             )
 
         coord_name_orig = f"{self.target_coord}_orig"
+        if self.target_coord not in data.coords and coord_name_orig not in data.coords:
+            return data  # unlabeled data: nothing was encoded
 
         # Remove the encoded target coordinate
         data = data.drop_vars(self.target_coord)
@@ -783,7 +792,7 @@ class Predictor(Transform, ABC):
         output_coords = {self.sample_dim: data.coords[self.sample_dim].values}
 
         for coord_name, coord_data in data.coords.items():
-            if (coord_name != self.sample_dim) and (self.sample_dim in coord_data.dims):
+            if (coord_name != self.sample_dim) and coord_data.dims == (self.sample_dim,):  # per-trial only
                 output_coords[coord_name] = coord_data
 
         return output_coords
@@ -1122,7 +1131,7 @@ class Predictor(Transform, ABC):
         """
         data = container.data
         if self.is_classifier and not self.is_multilabel:
-            data = self._encode_target_coord(data)  # already handles ValueError if encoder is not fitted
+            data = self._encode_target_coord(data, missing_ok=True)  # handles ValueError if encoder is not fitted
 
         if self.proba and not self.is_multilabel:  # only for single-label classifiers, checked in __init__
             # Use the core _predict_proba logic to get raw probabilities
@@ -1192,9 +1201,9 @@ class Predictor(Transform, ABC):
         container = self._apply_selection(container)
         data = container.data
 
-        # Encode target_coord if single-label classifier.
+        # Encode target_coord if single-label classifier (new data may have no labels).
         if self.is_classifier and not self.is_multilabel:
-            data = self._encode_target_coord(data)
+            data = self._encode_target_coord(data, missing_ok=True)
 
         # Make the prediction
         if self.is_multilabel and getattr(self, "calibrated_thresholds_", None) is not None:
@@ -1283,8 +1292,8 @@ class Predictor(Transform, ABC):
             )
             result = DataContainer(output_da)
         else:
-            # Encode target_coord, predict, and align to global classes.
-            data = self._encode_target_coord(data)
+            # Encode target_coord (if labelled), predict, and align to global classes.
+            data = self._encode_target_coord(data, missing_ok=True)
             probabilities, class_labels = self._predict_proba(data, **kwargs)
             probabilities = self._align_proba_to_global(probabilities, class_labels)
             assert probabilities.ndim == 2, f"Probabilities should have 2 dimensions, but got {probabilities.ndim}"

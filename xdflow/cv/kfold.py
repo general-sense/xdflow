@@ -3,7 +3,7 @@ from collections.abc import Callable, Hashable, Iterator
 from typing import cast
 
 import numpy as np
-from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
 
 from xdflow.core.data_container import DataContainer
 from xdflow.cv.base import CrossValidator
@@ -46,7 +46,7 @@ class KFoldValidator(CrossValidator):
         stratify_coord: str | None = None,
         exclude_intertrial_from_scoring: bool = False,
         exclude_offsets_from_scoring: bool = False,
-        use_stateful_fit_cache: bool = True,
+        use_stateful_fit_cache: bool = False,
         release_fold_memory: bool = False,
         scoring_needs_proba: bool = False,
         verbose: bool = True,
@@ -65,7 +65,7 @@ class KFoldValidator(CrossValidator):
             scoring: Scoring metric to use. If None, auto-selects based on task type.
             stratify_coord: Optional coordinate name to use for stratified splits (train/val/holdout).
             exclude_intertrial_from_scoring: Whether to drop intertrial segments when evaluating folds/holdout.
-            use_stateful_fit_cache: Whether to cache stateful transforms during CV.
+            use_stateful_fit_cache: Whether to reuse fitted fold pipelines cached on disk by earlier identical runs.
             verbose: Whether to print verbose output specific to cross-validation.
         """
         super().__init__(
@@ -254,7 +254,7 @@ class GroupedKFoldValidator(CrossValidator):
         stratify_by_group: bool = True,
         exclude_intertrial_from_scoring: bool = False,
         exclude_offsets_from_scoring: bool = False,
-        use_stateful_fit_cache: bool = True,
+        use_stateful_fit_cache: bool = False,
         release_fold_memory: bool = False,
         scoring_needs_proba: bool = False,
         verbose: bool = True,
@@ -280,7 +280,7 @@ class GroupedKFoldValidator(CrossValidator):
                               If True (default), stratifies by group+target combination.
                               If False, only stratifies by target (or stratify_coord if set).
             exclude_intertrial_from_scoring: Whether to drop intertrial segments during evaluation.
-            use_stateful_fit_cache: Whether to cache stateful transforms during CV.
+            use_stateful_fit_cache: Whether to reuse fitted fold pipelines cached on disk by earlier identical runs.
             verbose: Whether to print verbose output specific to cross-validation.
         """
         super().__init__(
@@ -359,6 +359,9 @@ class GroupedKFoldValidator(CrossValidator):
 
         all_trials = container.data.trial.values
         all_groups = container.data.coords[self.group_coord].values
+        if self.test_groups is not None and self.test_size:  # holdout scoring trains on all but the kept test groups
+            in_test_groups = np.isin(all_groups, np.asarray(self.test_groups))
+            self._refuse_units_across(container.data, in_test_groups, f"'{self.group_coord}' (in test_groups or not)")
 
         if self.test_size is None or self.test_size == 0:
             # No holdout set - use all data for cross-validation
@@ -378,12 +381,11 @@ class GroupedKFoldValidator(CrossValidator):
             stratify_labels = labels
 
         # Split positions (not trial labels) so group lookups below index all_groups correctly
-        train_val_pos, holdout_pos = train_test_split(
-            np.arange(len(all_trials)),
-            test_size=self.test_size,
-            stratify=stratify_labels,
-            random_state=self.random_state,
+        units, unit_labels, to_trials = self._split_units(container.data, stratify_labels)
+        train_val_units, holdout_units = train_test_split(
+            units, test_size=self.test_size, stratify=unit_labels, random_state=self.random_state
         )
+        train_val_pos, holdout_pos = to_trials(train_val_units), to_trials(holdout_units)
 
         if (
             self.train_groups is not None and self.val_groups is not None
@@ -437,7 +439,11 @@ class GroupedKFoldValidator(CrossValidator):
             stratify_labels = labels_array
 
         # skf.split works on integer positions, so we map back to trial IDs
-        for train_pos, val_pos in skf.split(np.arange(len(labels_array)), stratify_labels):
+        units, unit_labels, to_trials = self._split_units(cv_container, stratify_labels)
+        if unit_labels is None:
+            skf = KFold(n_splits=self.n_splits, shuffle=self.shuffle, random_state=self.random_state)
+        for train_units, val_units in skf.split(units, unit_labels):
+            train_pos, val_pos = to_trials(train_units), to_trials(val_units)
             # keep only indices that are relevant to the specified groups
             if self.train_groups is not None:
                 train_pos = train_pos[np.isin(cv_groups[train_pos], np.asarray(self.train_groups))]

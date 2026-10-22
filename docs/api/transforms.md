@@ -20,6 +20,8 @@ For authoring guidance, examples, and test patterns, see [Writing Custom Transfo
 
 ::: xdflow.transforms.basic_transforms.FlattenTransform
 
+::: xdflow.transforms.function_step.step
+
 ::: xdflow.transforms.basic_transforms.FunctionTransform
 
 ::: xdflow.transforms.basic_transforms.UnflattenTransform

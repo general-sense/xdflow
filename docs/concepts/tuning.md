@@ -85,6 +85,10 @@ The static prefix is fit/transformed once and reused as the trial input. The dyn
 
 If a step learns from samples or depends on the split boundary, it should be marked stateful so it is not cached across folds or trials incorrectly.
 
+The prefix is reused through the disk cache. Results that depend on your own functions are recomputed rather than reused from the disk cache, since xdflow cannot see every code they depend on; set `XDFLOW_CACHE_USER_CODE=1` to cache them when they depend only on their code, parameters and the modules they read. Without it, a prefix that contains your own functions is recomputed for each trial.
+
+A cache key covers the data (values, coordinates, attrs), every step's parameters, and the code of xdflow and of the installed packages (reinstalling or upgrading one invalidates the cache). It does not cover files or environment variables a step reads, packages edited in place without reinstalling, or the global NumPy random state. Fitted fold models are cached only when a validator has `use_stateful_fit_cache=True` (off by default), since a reused fit of an estimator without `random_state` repeats one random draw.
+
 ## Final model and holdout score
 
 After tuning, the common workflow is:

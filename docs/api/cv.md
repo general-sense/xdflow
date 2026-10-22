@@ -28,6 +28,10 @@ For custom split policies, see [Writing Custom Cross-Validators](../guides/writi
 
 ::: xdflow.cv.leave_group_out.LeaveAnimalOutValidator
 
+## Any scikit-learn Splitter
+
+::: xdflow.cv.splitter.SplitterValidator
+
 ## Sklearn Adapter
 
 ::: xdflow.cv.sklearn_adapter.SklearnCVAdapter
