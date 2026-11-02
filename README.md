@@ -347,6 +347,9 @@ and use cases are very welcome in [issues](https://github.com/general-sense/xdfl
 [tutorials](docs/tutorials/index.md), [writing custom transforms](docs/guides/writing-transforms.md) and
 [cross-validators](docs/guides/writing-cross-validators.md), and the [API reference](docs/api/index.md).
 
+For the motivation behind the project, read
+[Introducing XDFlow](https://www.generalsense.com/research/introducing-xdflow) on the General Sense blog.
+
 ## Contributing
 
 Contributions are welcome: new transforms, validators, examples on your own kind of data, bug reports, and
